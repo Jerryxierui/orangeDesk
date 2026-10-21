@@ -65,12 +65,20 @@ pub struct RenderConfig {
     pub frame_interval_ms: u64,
 }
 
+/// composition 路径的 DComp 树句柄（清理时断开 visual 用）
+struct DCompTree {
+    device: windows::Win32::Graphics::DirectComposition::IDCompositionDevice,
+    target: windows::Win32::Graphics::DirectComposition::IDCompositionTarget,
+}
+
 /// 线程间控制块
 struct Controls {
     run: AtomicBool,
     pause: AtomicBool,
     /// 暂停期间是否已执行过 Trim（避免每 100ms 重复 Trim）
     trimmed: AtomicBool,
+    /// 渲染线程的终止原因（None = 运行中 / 正常退出）；模块 status 读取（P6）
+    error: std::sync::Mutex<Option<String>>,
 }
 
 /// 渲染器句柄：持有渲染线程，提供暂停 / 恢复 / 停止控制
@@ -86,6 +94,7 @@ impl Renderer {
             run: AtomicBool::new(true),
             pause: AtomicBool::new(false),
             trimmed: AtomicBool::new(false),
+            error: std::sync::Mutex::new(None),
         });
         let thread_controls = controls.clone();
         let thread = thread::Builder::new()
@@ -121,6 +130,11 @@ impl Renderer {
         }
         Ok(())
     }
+
+    /// 渲染线程终止原因（None = 运行中或正常退出）；status / 仪表盘展示用（P6）
+    pub fn render_error(&self) -> Option<String> {
+        self.controls.error.lock().ok().and_then(|e| e.clone())
+    }
 }
 
 /// 渲染线程主循环（负责 COM 生命周期包裹）
@@ -146,6 +160,10 @@ fn run_render_loop(topology: DesktopTopology, config: RenderConfig, controls: &C
 
     if let Err(err) = result {
         log::error!("wallpaper render loop: {err}");
+        // 终止原因上报给模块 status（P6：渲染失败必须用户可见，不静默）
+        if let Ok(mut slot) = controls.error.lock() {
+            *slot = Some(err);
+        }
     }
 }
 
@@ -158,8 +176,9 @@ fn run_render_loop_inner(
         // 1. 拓扑挂载（必须在渲染线程：窗口线程相关性）
         let host = crate::mount::create_wallpaper_child(&topology)?;
 
-        // 2. D3D11 设备（硬件 + BGRA；视频路径后续追加 VIDEO_SUPPORT）
-        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+        // 2. D3D11 设备：硬件优先，失败回退 WARP 软件光栅
+        //    （无 GPU / 无头会话如 CI runner；A-1 降级序列的起点）
+        use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
         use windows::Win32::Graphics::Direct3D11::{
             D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             D3D11_SDK_VERSION,
@@ -173,24 +192,36 @@ fn run_render_loop_inner(
             DXGI_USAGE_RENDER_TARGET_OUTPUT,
         };
 
-        let mut device: Option<ID3D11Device> = None;
-        let mut context: Option<ID3D11DeviceContext> = None;
-        D3D11CreateDevice(
-            None,
-            D3D_DRIVER_TYPE_HARDWARE,
-            windows::Win32::Foundation::HMODULE::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            None,
-            D3D11_SDK_VERSION,
-            Some(&mut device),
-            None,
-            Some(&mut context),
-        )
-        .map_err(|err| format!("D3D11CreateDevice failed: {err}"))?;
-        let device = device.ok_or("device out-param missing")?;
-        let context = context.ok_or("context out-param missing")?;
+        let create_device = |driver_type| {
+            let mut device: Option<ID3D11Device> = None;
+            let mut context: Option<ID3D11DeviceContext> = None;
+            D3D11CreateDevice(
+                None,
+                driver_type,
+                windows::Win32::Foundation::HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+            .ok()
+            .and_then(|_| device.zip(context))
+        };
+        let (device, context, using_warp) = match create_device(D3D_DRIVER_TYPE_HARDWARE) {
+            Some(pair) => (pair.0, pair.1, false),
+            None => {
+                let (device, context) = create_device(D3D_DRIVER_TYPE_WARP)
+                    .ok_or("D3D11CreateDevice failed (hardware and WARP)")?;
+                log::warn!("wallpaper: hardware D3D unavailable, using WARP software rasterizer");
+                (device, context, true)
+            }
+        };
 
-        // 3. DXGI 设备 / 工厂 + composition 交换链（flip-model，DComp 定尺寸）
+        // 3. DXGI 设备 / 工厂 + 交换链（flip-model）。
+        //    A-1 降级序列：DirectComposition 提交（首选）→ hwnd 关联交换链
+        //    （Classic WorkerW 时代的常规管线，无需 DComp）。
         use windows::core::Interface;
         let dxgi_device = device
             .cast::<IDXGIDevice3>()
@@ -213,37 +244,49 @@ fn run_render_loop_inner(
             AlphaMode: DXGI_ALPHA_MODE_IGNORE,
             Flags: 0,
         };
-        let swapchain = factory
-            .CreateSwapChainForComposition(&device, &desc, None)
-            .map_err(|err| format!("CreateSwapChainForComposition failed: {err}"))?;
-
-        // 4. DirectComposition 树：visual 内容 = 交换链，挂到壁纸宿主窗口
         use windows::Win32::Graphics::DirectComposition::{
             DCompositionCreateDevice, IDCompositionDevice,
         };
-        let dcomp_device: IDCompositionDevice =
-            DCompositionCreateDevice::<_, IDCompositionDevice>(&dxgi_device)
-                .map_err(|err| format!("DCompositionCreateDevice failed: {err}"))?;
-        let target = dcomp_device
-            .CreateTargetForHwnd(host, true)
-            .map_err(|err| format!("CreateTargetForHwnd failed: {err}"))?;
-        let visual = dcomp_device
-            .CreateVisual()
-            .map_err(|err| format!("CreateVisual failed: {err}"))?;
-        // SetContent 接受 IUnknown 参数（COM 层级），显式上转
-        let swapchain_unknown = swapchain
-            .cast::<windows::core::IUnknown>()
-            .map_err(|err| format!("swapchain cast IUnknown failed: {err}"))?;
-        visual
-            .SetContent(Some(&swapchain_unknown))
-            .map_err(|err| format!("SetContent failed: {err}"))?;
-        target
-            .SetRoot(Some(&visual))
-            .map_err(|err| format!("SetRoot failed: {err}"))?;
-        dcomp_device
-            .Commit()
-            .map_err(|err| format!("DComp Commit failed: {err}"))?;
-        log::info!("wallpaper: DComp pipeline ready (flip-model, 2 buffers)");
+        // 主路径：composition flip-model（交换链 + DComp 树一并就绪才算成功）
+        let composition_path = |factory: &windows::Win32::Graphics::Dxgi::IDXGIFactory2| {
+            let swapchain = factory.CreateSwapChainForComposition(&device, &desc, None)?;
+            let dcomp_device: IDCompositionDevice =
+                DCompositionCreateDevice::<_, IDCompositionDevice>(&dxgi_device)?;
+            let target = dcomp_device.CreateTargetForHwnd(host, true)?;
+            let visual = dcomp_device.CreateVisual()?;
+            // SetContent 接受 IUnknown 参数（COM 层级），显式上转
+            let swapchain_unknown = swapchain.cast::<windows::core::IUnknown>()?;
+            visual.SetContent(Some(&swapchain_unknown))?;
+            target.SetRoot(Some(&visual))?;
+            dcomp_device.Commit()?;
+            Ok::<_, windows::core::Error>((
+                swapchain,
+                Some(DCompTree {
+                    device: dcomp_device,
+                    target,
+                }),
+            ))
+        };
+        let (swapchain, dcomp) = match composition_path(&factory) {
+            Ok(pair) => {
+                log::info!("wallpaper: DComp pipeline ready (flip-model, 2 buffers)");
+                pair
+            }
+            Err(err) => {
+                // 降级：hwnd 关联交换链（无 DComp；WARP 场景 / DComp 受限环境）
+                log::warn!(
+                    "wallpaper: composition path unavailable ({err}), falling back to hwnd swapchain"
+                );
+                let swapchain = factory
+                    .CreateSwapChainForHwnd(&device, host, &desc, None, None)
+                    .map_err(|err| format!("CreateSwapChainForHwnd fallback failed: {err}"))?;
+                log::info!("wallpaper: hwnd flip-model pipeline ready (no DComp)");
+                (swapchain, None)
+            }
+        };
+        if using_warp {
+            log::warn!("wallpaper: running on WARP — expect limited performance (headless / no-GPU environment?)");
+        }
 
         // 5. 首帧：按内容源分发。静态内容（纯色 / 图片）脏标记驱动、绘制一次；
         //    视频模式建立解码管线，首帧由第 6 步循环按帧率档位立即提交。
@@ -364,13 +407,15 @@ fn run_render_loop_inner(
             }
         }
 
-        // 7. 清理：断开 visual 树并提交，释放 DComp target；关闭视频管线（MF 配对关闭）
+        // 7. 清理：断开 visual 树并提交（仅 composition 路径）；关闭视频管线（MF 配对关闭）
         drop(video);
         if mf_inited {
             crate::video::VideoPipeline::shutdown_mf();
         }
-        let _ = target.SetRoot(None);
-        let _ = dcomp_device.Commit();
+        if let Some(tree) = &dcomp {
+            let _ = tree.target.SetRoot(None);
+            let _ = tree.device.Commit();
+        }
         log::info!("wallpaper: render thread exited cleanly");
         Ok(())
     }

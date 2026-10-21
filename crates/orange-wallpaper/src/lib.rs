@@ -307,6 +307,16 @@ impl Module for WallpaperModule {
     }
 
     fn status(&self) -> ModuleStatus {
+        // 渲染线程终止（两条降级路径都失败）→ 最高降级档位 + 用户可见原因（P6）
+        #[cfg(windows)]
+        if let Some(engine) = &self.engine {
+            if let Some(err) = engine.render_error() {
+                return ModuleStatus {
+                    level: DegradeLevel::Suspended,
+                    detail: format!("render pipeline failed: {err}"),
+                };
+            }
+        }
         let (level, detail) = match &self.state {
             WallpaperState::Created => (DegradeLevel::Full, String::new()),
             WallpaperState::Running { detail } => (DegradeLevel::Full, detail.clone()),
