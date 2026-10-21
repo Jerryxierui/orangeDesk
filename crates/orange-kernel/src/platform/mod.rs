@@ -6,7 +6,6 @@
 //! 供内核链路在开发机 / CI 上验证。
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use crate::bus::EventPublisher;
 
@@ -425,7 +424,7 @@ pub mod windows_impl {
                         && rect.right >= info.rcMonitor.right
                         && rect.bottom >= info.rcMonitor.bottom;
                     // 带系统边框的“最大化”不算全屏独占；无边框且覆盖整屏才算
-                    covers && (style & WS_OVERLAPPEDWINDOW.0 as u32) != WS_OVERLAPPEDWINDOW.0 as u32
+                    covers && (style & WS_OVERLAPPEDWINDOW.0) != WS_OVERLAPPEDWINDOW.0
                 } else {
                     false
                 }
@@ -458,6 +457,7 @@ pub mod windows_impl {
 mod unix {
     use super::*;
     use std::thread;
+    use std::time::Duration;
 
     /// 占位事件源：orangeDesk 是 Windows 单平台产品（§10），
     /// 非 Windows 上仅维持链路（配置/注册/总线/降级路径）可运行、可测试。

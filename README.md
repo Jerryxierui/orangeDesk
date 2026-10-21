@@ -12,10 +12,13 @@ Windows 单平台优先（§10），Rust 内核 + 原生渲染，Apache-2.0。
 | v0.1 目标（文档 §6） | 状态 |
 |---|---|
 | 拓扑探测器（Classic WorkerW / Raised 24H2+ / 回退，0x052C + 重试） | ✅ `orange-wallpaper/src/topology.rs` |
-| 壁纸最小实现：DirectComposition flip-model 提交 | 🟡 骨架（纯色管线 + Trim + 暂停纪律；图片/视频解码待补） |
+| 壁纸最小实现：DirectComposition flip-model 提交 | 🟡 纯色 + 图片（WIC 解码 + D2D DrawBitmap + cover 缩放 + 失败降级纯色）已通；视频硬解待补 |
 | 内核：单实例互斥、模块注册、生命周期事件（锁屏/全屏/电池） | ✅ `orange-kernel`（事件总线 + 注册中心 + 崩溃隔离 + supervisor） |
-| 多显示器 / 混合 DPI 专项摸底 | ⬜ v0.4 专项前先积累 case |
+| 多显示器 / 混合 DPI 专项摸底 | ✅ `orange-wallpaper/src/monitor.rs`（枚举 + 每屏 DPI + 混合 DPI 风险检测，初始化时输出报告；per-monitor 独立壁纸仍属 v0.4） |
 | 性能基准脚本就位 | ✅ `tools/perf-bench/`（采样 + 阈值占位 + CI 归档） |
+
+图片格式说明：WIC 内置 JPG / PNG / BMP / TIFF / GIF；WebP / AVIF 依赖系统编解码扩展
+（微软商店的 WebP / AV1 扩展），缺扩展时自动降级纯色并在日志给出原因（P3 不静默失败）。
 
 ## 架构（§2：微内核 + 可插拔能力模块 + 拓扑适配层）
 

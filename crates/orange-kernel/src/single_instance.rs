@@ -52,8 +52,8 @@ fn acquire_windows() -> Result<(), SingleInstanceError> {
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
         return Err(SingleInstanceError::AlreadyRunning);
     }
-    // 故意不 CloseHandle：持锁到进程结束
-    std::mem::forget(handle);
+    // HANDLE 为纯句柄值（无 Drop / Copy），不 CloseHandle 即持有到进程结束
+    let _ = handle;
     Ok(())
 }
 

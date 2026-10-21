@@ -6,8 +6,8 @@
 //! - 渲染管线按 DirectComposition flip-model 提交模型设计；GDI/blt 永不作为主路径
 //! - 暂停而非降帧：全屏独占 / DRM / 锁屏 / 电池节能 → 完全暂停渲染 + 显存 Trim
 //!
-//! v0.1 范围：拓扑探测 + 挂载 + 纯色 DComp 渲染骨架；图片 / 视频解码
-//! （WIC / video processor blit）在 v0.1 内后续补齐，本文件 TODO 标注。
+//! v0.1 范围：拓扑探测 + 挂载 + 纯色 / 图片（WIC + D2D DrawBitmap）路径；
+//! 视频硬解（video processor blit）TODO 标注，v0.1 内补齐。
 
 use orange_module_api::{
     DegradeLevel, KernelEvent, Module, ModuleConfig, ModuleDeclaration, ModuleError, ModuleStatus,
@@ -16,6 +16,10 @@ use orange_module_api::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+// 纯几何逻辑：调用方（renderer）仅 Windows；非 Windows 保留供单元测试
+#[cfg_attr(not(windows), allow(dead_code))]
+mod geometry;
+pub mod monitor;
 #[cfg(windows)]
 mod mount;
 #[cfg(windows)]
@@ -130,15 +134,44 @@ impl WallpaperModule {
 
     #[cfg(windows)]
     fn start_engine(&mut self) -> Result<(), ModuleError> {
+        // 多显示器 / DPI 摸底（v0.1 §6 专项：先收集拓扑与风险信号）
+        let monitors = monitor::probe();
+        log::info!("{}", monitors.report_text());
+
         let topology = topology::probe();
         log::info!("desktop topology: {topology:?}");
-        let color = parse_hex_color(&self.settings.solid_color)
+        let fallback_color = parse_hex_color(&self.settings.solid_color)
             .unwrap_or_else(|| parse_hex_color("#F76B1C").expect("valid literal"));
+        // 内容源组装（P3：配置不可用时降级并有明确说明，不静默黑屏）
+        let content = match self.settings.mode {
+            WallpaperMode::Solid => renderer::ContentSource::Solid {
+                color: fallback_color,
+            },
+            WallpaperMode::Image => match &self.settings.image_path {
+                Some(path) => renderer::ContentSource::Image {
+                    path: path.clone(),
+                    fallback_color,
+                },
+                None => {
+                    log::warn!("wallpaper: image mode without image_path, solid fallback");
+                    renderer::ContentSource::Solid {
+                        color: fallback_color,
+                    }
+                }
+            },
+            WallpaperMode::Video => {
+                // TODO(v0.1): Media Foundation 硬解 + GPU video processor blit
+                // （flip-model 后缓冲禁止 UpdateSubresource / CPU 回写，A-1 纪律）
+                renderer::ContentSource::Solid {
+                    color: fallback_color,
+                }
+            }
+        };
         // 挂载 + DComp 初始化在渲染线程内完成（窗口线程相关性）
         let renderer = renderer::Renderer::spawn(
             topology,
             renderer::RenderConfig {
-                color,
+                content,
                 frame_interval_ms: self.settings.fps_tier.frame_interval_ms(),
             },
         )
@@ -146,15 +179,11 @@ impl WallpaperModule {
         self.engine = Some(renderer);
         let detail = match self.settings.mode {
             WallpaperMode::Solid => String::new(),
-            WallpaperMode::Image => {
-                // TODO(v0.1): WIC 解码 + D2D DrawBitmap 提交；当前回退纯色
-                "image pipeline pending, solid fallback".to_string()
+            WallpaperMode::Image if self.settings.image_path.is_none() => {
+                "image mode without image_path, solid fallback".to_string()
             }
-            WallpaperMode::Video => {
-                // TODO(v0.1): Media Foundation 硬解 + GPU video processor blit
-                // （flip-model 后缓冲禁止 UpdateSubresource / CPU 回写，A-1 纪律）
-                "video pipeline pending, solid fallback".to_string()
-            }
+            WallpaperMode::Image => String::new(),
+            WallpaperMode::Video => "video pipeline pending, solid fallback".to_string(),
         };
         self.state = WallpaperState::Running { detail };
         Ok(())
@@ -304,6 +333,8 @@ impl WallpaperModule {
         Ok(())
     }
 
+    // 仅供非 Windows 分支的 Unsupported 原因复用（开发机 / CI 链路验证）
+    #[cfg_attr(windows, allow(dead_code))]
     fn state_offline_reason(&self) -> &str {
         match &self.state {
             WallpaperState::Offline { reason } => reason,

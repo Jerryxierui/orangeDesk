@@ -53,7 +53,7 @@ pub fn config_dir() -> PathBuf {
         // APPDATA 由系统保证存在；防御性回退到用户目录
         std::env::var_os("APPDATA")
             .map(PathBuf::from)
-            .unwrap_or_else(|| home_dir_fallback())
+            .unwrap_or_else(home_dir_fallback)
             .join("orangeDesk")
     }
     #[cfg(not(windows))]
