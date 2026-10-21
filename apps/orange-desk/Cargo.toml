@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 orange-kernel = { workspace = true }
 orange-module-api = { workspace = true }
+orange-taskbar = { workspace = true }
 orange-wallpaper = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }

@@ -8,6 +8,7 @@ pub mod bus;
 pub mod config;
 pub mod platform;
 pub mod registry;
+pub mod sampling;
 pub mod single_instance;
 pub mod supervisor;
 

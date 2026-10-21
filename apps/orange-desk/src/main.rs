@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use orange_kernel::{config, single_instance, supervisor};
 use orange_module_api::Module;
+use orange_taskbar::TaskbarModule;
 use orange_wallpaper::WallpaperModule;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -86,8 +87,11 @@ fn main() -> ExitCode {
     );
 
     // 模块装配：新增能力 = 在此注册一个新模块，不触碰内核
-    // （v0.2+：taskbar / widgets / window-material）
-    let modules: Vec<Box<dyn Module>> = vec![Box::new(WallpaperModule::new())];
+    // （v0.3+：widgets / window-material）
+    let modules: Vec<Box<dyn Module>> = vec![
+        Box::new(WallpaperModule::new()),
+        Box::new(TaskbarModule::new()),
+    ];
 
     let report = supervisor::run(
         app_config.modules.clone(),
@@ -97,14 +101,33 @@ fn main() -> ExitCode {
         },
     );
 
-    // 退出摘要（P6：降级与隔离用户可见）
+    // 退出摘要（P6：降级与隔离用户可见；detail 含材质 / 降级说明）
     println!("— orangeDesk session summary —");
-    println!("  online : {}", report.online_modules.join(", "));
-    for (module, reason) in &report.offline_modules {
-        println!("  offline: {module} — {reason}");
-    }
-    for module in &report.crashed_modules {
-        println!("  crashed (isolated): {module}");
+    for module in &report.modules {
+        let state = if module.crash_count > 0 {
+            "crashed (isolated)"
+        } else if module.online {
+            "online"
+        } else {
+            "offline"
+        };
+        let detail = if module.detail.is_empty() {
+            "-"
+        } else {
+            &module.detail
+        };
+        println!("  {:<12} [{state}] {detail}", module.id);
+        if !module.online && module.crash_count == 0 {
+            let reason = report
+                .offline_modules
+                .iter()
+                .find(|(id, _)| id == &module.id)
+                .map(|(_, reason)| reason.as_str())
+                .unwrap_or("");
+            if !reason.is_empty() {
+                println!("  {:<12} reason: {reason}", "");
+            }
+        }
     }
     ExitCode::SUCCESS
 }

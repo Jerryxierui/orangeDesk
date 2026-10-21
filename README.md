@@ -7,12 +7,24 @@
 设计文档：[orangedesk-plan-v2.md](./orangedesk-plan-v2.md)（§编号在本仓库代码注释中随处引用）。
 Windows 单平台优先（§10），Rust 内核 + 原生渲染，Apache-2.0。
 
-## 当前状态：v0.1 开发中（拓扑验证 + 内核骨架）
+## 当前状态：v0.1 代码完成 → v0.2 进行中（任务栏透明 + 性能仪表盘）
+
+**v0.2 已落地**（§3 模块 C + §6 v0.2）：
+- `orange-taskbar`：`SetWindowCompositionAttribute` 主路径（运行时动态解析，
+  undocumented API）、能力探测降级链（Acrylic → Blur → Clear → Native，
+  原因用户可见）、声明式规则引擎（条件 → 材质，默认规则开箱即用、配置可整体覆盖）、
+  事件驱动评估（前台进程 / 全屏 / 电池节能 / 锁屏）、explorer 重启自动重找窗口重应用、
+  finalize 恢复系统原生（卸载零残留）；预算 0.5% CPU / 15MB
+- 性能仪表盘数据层（§5/P6）：内核进程级采样（Windows GetProcessTimes/MemoryInfo +
+  Linux /proc）、`process.total` 全产品预算（§4 空闲行）接入预算管理器——
+  持续超标自动广播 `BudgetExceeded`；`ModuleStatus` 事件后刷新，
+  session summary 按模块输出材质 / 降级说明
+- v0.2 剩余：设置面板卫星进程（WinUI 3 / WPF，Windows 真机环境）与仪表盘 UI
 
 | v0.1 目标（文档 §6） | 状态 |
 |---|---|
 | 拓扑探测器（Classic WorkerW / Raised 24H2+ / 回退，0x052C + 重试） | ✅ `orange-wallpaper/src/topology.rs` |
-| 壁纸最小实现：DirectComposition flip-model 提交 | ✅ 纯色 + 图片（WIC + D2D DrawBitmap + cover 缩放）+ 视频（MF 硬解 + GPU VideoProcessor blt + 帧率档位 + 循环播放），失败均降级纯色并记录原因 |
+| 壁纸最小实现：DirectComposition flip-model 提交 | ✅ 纯色 + 图片（WIC + D2D DrawBitmap + cover 缩放）+ 视频（MF 硬解 + GPU VideoProcessor blit + 帧率档位 + 循环播放），失败均降级纯色并记录原因 |
 | 内核：单实例互斥、模块注册、生命周期事件（锁屏/全屏/电池） | ✅ `orange-kernel`（事件总线 + 注册中心 + 崩溃隔离 + supervisor） |
 | 多显示器 / 混合 DPI 专项摸底 | ✅ `orange-wallpaper/src/monitor.rs`（枚举 + 每屏 DPI + 混合 DPI 风险检测，初始化时输出报告；per-monitor 独立壁纸仍属 v0.4） |
 | 性能基准脚本就位 | ✅ `tools/perf-bench/`（采样 + 阈值占位 + CI 归档） |
@@ -31,6 +43,7 @@ apps/orange-desk        常驻主程序（单实例 → 配置 → 模块装配 
 crates/orange-kernel    微内核：只做总线 / 预算 / 注册 / 守护四件事
 crates/orange-module-api 模块契约：IModule 生命周期、KernelEvent、资源预算
 crates/orange-wallpaper 壁纸模块：拓扑适配 + DComp flip-model 渲染
+crates/orange-taskbar   任务栏透明模块：composition API + 规则引擎 + 能力降级
 tools/perf-bench        性能采样脚本（CI 门禁数据源）
 ```
 

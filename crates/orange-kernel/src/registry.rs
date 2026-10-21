@@ -200,7 +200,11 @@ impl ModuleRegistry {
             }
             let result = catch_unwind(AssertUnwindSafe(|| self.modules[idx].on_event(event)));
             match result {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => {
+                    // 事件处理可能改变模块降级档位，刷新快照供仪表盘读取
+                    let status = self.modules[idx].status();
+                    self.state_view.get_mut(&id).expect("state exists").status = status;
+                }
                 Ok(Err(orange_module_api::ModuleError::Crash(msg))) => {
                     self.mark_crashed(&id, &msg);
                 }

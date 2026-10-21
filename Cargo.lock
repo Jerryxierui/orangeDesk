@@ -208,6 +208,7 @@ dependencies = [
  "log",
  "orange-kernel",
  "orange-module-api",
+ "orange-taskbar",
  "orange-wallpaper",
  "serde_json",
 ]
@@ -233,6 +234,18 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "orange-taskbar"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "orange-module-api",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "windows",
 ]
 
 [[package]]

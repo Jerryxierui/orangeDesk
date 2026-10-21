@@ -5,13 +5,13 @@
 //! 3. 按拓扑序初始化（失败隔离）→ 4. 启动平台事件源线程 →
 //! 5. 事件分发循环 → 6. 收到停机信号后逆序 finalize
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use orange_module_api::{KernelEvent, Module, ModuleConfig};
+use orange_module_api::{KernelEvent, Module, ModuleConfig, ModuleDeclaration, ResourceBudget};
 
-use crate::budget::BudgetManager;
+use crate::budget::{BudgetManager, BudgetVerdict, UsageSample};
 use crate::bus::EventBus;
 use crate::platform;
 use crate::registry::ModuleRegistry;
@@ -23,13 +23,42 @@ pub struct SupervisorOptions {
     pub demo_events: bool,
 }
 
+/// 单模块的退出报告行（性能仪表盘数据；detail 为模块自述的降级/材质状态）
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ModuleReport {
+    pub id: String,
+    pub online: bool,
+    pub suspended: bool,
+    pub crash_count: u32,
+    pub detail: String,
+}
+
 /// 一次内核运行的报告（退出时打印 / 测试断言用）
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RunReport {
     pub online_modules: Vec<String>,
     pub offline_modules: Vec<(String, String)>,
     pub crashed_modules: Vec<String>,
+    /// 各模块最终状态（含降级说明，仪表盘 / session summary 数据源）
+    pub modules: Vec<ModuleReport>,
 }
+
+/// 进程级预算条目（§4「全产品空闲」行：CPU < 0.8%、内存 < 60MB）
+fn process_total_declaration() -> ModuleDeclaration {
+    ModuleDeclaration {
+        id: "process.total",
+        depends_on: BTreeSet::new(),
+        budget: ResourceBudget {
+            idle_cpu_percent: 0.8,
+            max_memory_mb: 60,
+            needs_gpu: false,
+        },
+        description: "whole-process idle budget (design doc section 4)",
+    }
+}
+
+/// 进程采样周期（秒级低频，仪表盘与预算观察共用一次采样）
+const SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 
 /// 运行内核直到停机信号（Ctrl+C / ShutdownRequested 事件）。
 ///
@@ -48,6 +77,8 @@ pub fn run(
             log::error!("module registration failed: {err}");
         }
     }
+    // 全产品进程级预算（§4）
+    budgets.register(&process_total_declaration());
     match registry.resolve() {
         Ok(_) => {}
         Err(err) => {
@@ -86,7 +117,10 @@ pub fn run(
             .expect("spawn demo injector");
     }
 
-    // 事件分发循环（250ms 心跳用于检查停机标志；无高频轮询，P4）
+    // 事件分发循环（250ms 心跳用于检查停机标志；无高频轮询，P4）。
+    // 每 SAMPLE_INTERVAL 做一次进程级采样：喂给预算管理器（process.total）
+    // 并在持续超标时广播 BudgetExceeded（P6 用户可见）。
+    let mut last_sample = Instant::now() - SAMPLE_INTERVAL;
     loop {
         match bus.recv_timeout(Duration::from_millis(250)) {
             Some(KernelEvent::ShutdownRequested) => {
@@ -99,6 +133,25 @@ pub fn run(
         if platform::shutdown_requested() {
             log::info!("shutdown requested via signal");
             break;
+        }
+        if last_sample.elapsed() >= SAMPLE_INTERVAL {
+            last_sample = Instant::now();
+            if let Some(sample) = crate::sampling::sample() {
+                let usage = UsageSample {
+                    cpu_percent: sample.cpu_percent,
+                    memory_mb: sample.working_set_mb,
+                };
+                if budgets.observe("process.total", usage) == BudgetVerdict::Exceeded {
+                    log::error!(
+                        "process budget exceeded (§4): cpu {:.2}% mem {:.1}MB",
+                        usage.cpu_percent,
+                        usage.memory_mb
+                    );
+                    publisher.publish(KernelEvent::BudgetExceeded {
+                        module: "process.total".to_string(),
+                    });
+                }
+            }
         }
     }
 
@@ -121,6 +174,13 @@ pub fn run(
                 .offline_modules
                 .push((state.id.clone(), state.note.clone()));
         }
+        report.modules.push(ModuleReport {
+            id: state.id.clone(),
+            online: state.online,
+            suspended: state.suspended,
+            crash_count: state.crash_count,
+            detail: state.status.detail.clone(),
+        });
     }
     report
 }
