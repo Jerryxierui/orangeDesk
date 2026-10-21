@@ -22,10 +22,15 @@ mod geometry;
 pub mod monitor;
 #[cfg(windows)]
 mod mount;
+// 帧率档位调度：调用方（renderer）仅 Windows；非 Windows 保留供单元测试
+#[cfg_attr(not(windows), allow(dead_code))]
+mod pacing;
 #[cfg(windows)]
 mod renderer;
 #[cfg(windows)]
 mod topology;
+#[cfg(windows)]
+mod video;
 
 /// 帧率档位（§3 A-1：30 / 60 / 120 / 无限，双缓冲 + VSync）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,13 +164,18 @@ impl WallpaperModule {
                     }
                 }
             },
-            WallpaperMode::Video => {
-                // TODO(v0.1): Media Foundation 硬解 + GPU video processor blit
-                // （flip-model 后缓冲禁止 UpdateSubresource / CPU 回写，A-1 纪律）
-                renderer::ContentSource::Solid {
-                    color: fallback_color,
+            WallpaperMode::Video => match &self.settings.video_path {
+                Some(path) => renderer::ContentSource::Video {
+                    path: path.clone(),
+                    fallback_color,
+                },
+                None => {
+                    log::warn!("wallpaper: video mode without video_path, solid fallback");
+                    renderer::ContentSource::Solid {
+                        color: fallback_color,
+                    }
                 }
-            }
+            },
         };
         // 挂载 + DComp 初始化在渲染线程内完成（窗口线程相关性）
         let renderer = renderer::Renderer::spawn(
@@ -183,7 +193,10 @@ impl WallpaperModule {
                 "image mode without image_path, solid fallback".to_string()
             }
             WallpaperMode::Image => String::new(),
-            WallpaperMode::Video => "video pipeline pending, solid fallback".to_string(),
+            WallpaperMode::Video if self.settings.video_path.is_none() => {
+                "video mode without video_path, solid fallback".to_string()
+            }
+            WallpaperMode::Video => String::new(),
         };
         self.state = WallpaperState::Running { detail };
         Ok(())

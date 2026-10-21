@@ -32,6 +32,29 @@ pub enum ContentSource {
         path: String,
         fallback_color: [f32; 4],
     },
+    /// 视频（MF 硬解 + GPU VideoProcessor blit，循环播放，静音）；
+    /// 管线失败时用 `fallback_color` 填充并记录明确原因
+    Video {
+        path: String,
+        fallback_color: [f32; 4],
+    },
+}
+
+impl ContentSource {
+    /// 所有模式统一的降级颜色
+    fn fallback_color(&self) -> [f32; 4] {
+        match self {
+            ContentSource::Solid { color }
+            | ContentSource::Image {
+                fallback_color: color,
+                ..
+            }
+            | ContentSource::Video {
+                fallback_color: color,
+                ..
+            } => *color,
+        }
+    }
 }
 
 /// 渲染配置
@@ -39,7 +62,6 @@ pub enum ContentSource {
 pub struct RenderConfig {
     pub content: ContentSource,
     /// 目标帧间隔（ms）；0 = 仅 VSync 对齐（视频模式使用，静态内容无关）
-    #[allow(dead_code)] // TODO(v0.1): 视频模式帧循环接入后移除
     pub frame_interval_ms: u64,
 }
 
@@ -146,8 +168,9 @@ fn run_render_loop_inner(
             DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
         };
         use windows::Win32::Graphics::Dxgi::{
-            CreateDXGIFactory1, IDXGIDevice3, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
-            DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            CreateDXGIFactory1, IDXGIDevice3, DXGI_PRESENT, DXGI_SCALING_STRETCH,
+            DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+            DXGI_USAGE_RENDER_TARGET_OUTPUT,
         };
 
         let mut device: Option<ID3D11Device> = None;
@@ -222,8 +245,12 @@ fn run_render_loop_inner(
             .map_err(|err| format!("DComp Commit failed: {err}"))?;
         log::info!("wallpaper: DComp pipeline ready (flip-model, 2 buffers)");
 
-        // 5. 首帧：按内容源分发（静态内容脏标记驱动：绘制一次即可）
+        // 5. 首帧：按内容源分发。静态内容（纯色 / 图片）脏标记驱动、绘制一次；
+        //    视频模式建立解码管线，首帧由第 6 步循环按帧率档位立即提交。
         let (screen_w, screen_h) = host_client_size(host);
+        let fallback_color = config.content.fallback_color();
+        let mut video: Option<crate::video::VideoPipeline> = None;
+        let mut mf_inited = false;
         match &config.content {
             ContentSource::Solid { color } => {
                 draw_solid_frame(&device, &context, &swapchain, *color)?;
@@ -245,13 +272,34 @@ fn run_render_loop_inner(
                     draw_solid_frame(&device, &context, &swapchain, *fallback_color)?;
                 }
             }
+            ContentSource::Video { path, .. } => {
+                mf_inited = true;
+                match crate::video::VideoPipeline::new(
+                    &device,
+                    &context,
+                    path,
+                    screen_w as u32,
+                    screen_h as u32,
+                ) {
+                    Ok(pipeline) => {
+                        log::info!("wallpaper: video pipeline ready ({path})");
+                        video = Some(pipeline);
+                    }
+                    Err(err) => {
+                        log::warn!("wallpaper: video degraded to solid fill ({path}): {err}");
+                        draw_solid_frame(&device, &context, &swapchain, fallback_color)?;
+                    }
+                }
+            }
         }
 
-        // 6. 帧循环：消息泵 + 控制标志。无高频轮询（P4），
-        //    50ms 心跳只为及时响应暂停 / 停机。
+        // 6. 帧循环：消息泵 + 控制标志。无高频轮询（P4）；
+        //    静态内容 50ms 心跳只为响应暂停 / 停机；视频模式由 FramePacer
+        //    按档位（30/60/120/Unlimited）驱动「解码一帧 → VP blt → Present(VSync)」。
         use windows::Win32::UI::WindowsAndMessaging::{
             DispatchMessageW, PeekMessageW, MSG, PM_REMOVE,
         };
+        let mut pacer = crate::pacing::FramePacer::new(config.frame_interval_ms);
         let mut msg = MSG::default();
         loop {
             if !controls.run.load(Ordering::SeqCst) {
@@ -271,12 +319,56 @@ fn run_render_loop_inner(
                 continue;
             }
 
-            // TODO(v0.1): 视频模式在此按 frame_interval_ms 持续提交帧；
-            // 纯色 / 图片模式无脏数据，跳过 Present 以保持空闲占用接近 0。
-            thread::sleep(Duration::from_millis(50));
+            if let Some(pipeline) = video.as_mut() {
+                let now = std::time::Instant::now();
+                if !pacer.should_present(now) {
+                    // 到期前小睡：既不空转也不睡过头（上限 8ms 保响应）
+                    let wait = pacer.until_next(now).min(Duration::from_millis(8));
+                    thread::sleep(wait);
+                    continue;
+                }
+                match pipeline.blt_next_frame(&swapchain) {
+                    Ok(true) => {
+                        let hr = swapchain.Present(1, DXGI_PRESENT(0));
+                        if hr.is_err() {
+                            log::error!("wallpaper: video Present failed: {hr:?}");
+                            video = None;
+                        } else {
+                            pacer.mark_presented(std::time::Instant::now());
+                        }
+                    }
+                    Ok(false) => {
+                        // EOF：循环重播（重建 SourceReader）
+                        if let Err(err) = pipeline.restart(&device) {
+                            log::error!("wallpaper: video loop restart failed: {err}");
+                            video = None;
+                        }
+                    }
+                    Err(err) => {
+                        log::error!("wallpaper: video pipeline failed: {err}");
+                        video = None;
+                    }
+                }
+                if video.is_none() {
+                    // 视频管线失效：降级纯色（P3/P6，不黑屏）
+                    video = None;
+                    if let Err(err) =
+                        draw_solid_frame(&device, &context, &swapchain, fallback_color)
+                    {
+                        log::error!("wallpaper: solid fallback failed: {err}");
+                    }
+                }
+            } else {
+                // 纯色 / 图片模式无脏数据，跳过 Present 以保持空闲占用接近 0
+                thread::sleep(Duration::from_millis(50));
+            }
         }
 
-        // 7. 清理：断开 visual 树并提交，释放 DComp target
+        // 7. 清理：断开 visual 树并提交，释放 DComp target；关闭视频管线（MF 配对关闭）
+        drop(video);
+        if mf_inited {
+            crate::video::VideoPipeline::shutdown_mf();
+        }
         let _ = target.SetRoot(None);
         let _ = dcomp_device.Commit();
         log::info!("wallpaper: render thread exited cleanly");
