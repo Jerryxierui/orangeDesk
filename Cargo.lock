@@ -210,6 +210,7 @@ dependencies = [
  "orange-module-api",
  "orange-taskbar",
  "orange-wallpaper",
+ "orange-widgets",
  "serde_json",
 ]
 
@@ -258,6 +259,18 @@ dependencies = [
  "serde_json",
  "thiserror",
  "windows",
+]
+
+[[package]]
+name = "orange-widgets"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "log",
+ "orange-module-api",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

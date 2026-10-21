@@ -1,0 +1,16 @@
+[package]
+name = "orange-widgets"
+description = "orangeDesk widget system: IWidget contract, EDF scheduler, first-party widgets (clock, sysmon)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+orange-module-api = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

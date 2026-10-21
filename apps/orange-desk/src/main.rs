@@ -9,6 +9,7 @@ use orange_kernel::{config, single_instance, supervisor};
 use orange_module_api::Module;
 use orange_taskbar::TaskbarModule;
 use orange_wallpaper::WallpaperModule;
+use orange_widgets::WidgetHost;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -87,10 +88,11 @@ fn main() -> ExitCode {
     );
 
     // 模块装配：新增能力 = 在此注册一个新模块，不触碰内核
-    // （v0.3+：widgets / window-material）
+    // （v0.4+：window-material）
     let modules: Vec<Box<dyn Module>> = vec![
         Box::new(WallpaperModule::new()),
         Box::new(TaskbarModule::new()),
+        Box::new(WidgetHost::new()),
     ];
 
     let report = supervisor::run(

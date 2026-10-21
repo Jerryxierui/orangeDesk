@@ -6,6 +6,7 @@ members = [
     "crates/orange-module-api",
     "crates/orange-taskbar",
     "crates/orange-wallpaper",
+    "crates/orange-widgets",
 ]
 
 [workspace.package]
@@ -18,6 +19,7 @@ orange-module-api = { path = "crates/orange-module-api" }
 orange-kernel = { path = "crates/orange-kernel" }
 orange-taskbar = { path = "crates/orange-taskbar" }
 orange-wallpaper = { path = "crates/orange-wallpaper" }
+orange-widgets = { path = "crates/orange-widgets" }
 log = "0.4"
 env_logger = "0.11"
 thiserror = "2"

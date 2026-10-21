@@ -9,6 +9,14 @@ Windows 单平台优先（§10），Rust 内核 + 原生渲染，Apache-2.0。
 
 ## 当前状态：v0.1 代码完成 → v0.2 进行中（任务栏透明 + 性能仪表盘）
 
+**v0.3 预研已落地**（§3 模块 B 跨平台核心）：
+- `orange-widgets`：`IWidget` 契约（独立更新频率 / 遮挡策略声明）、EDF 调度器
+  （最早截止优先；暂停恢复后追赶一轮即回正常节奏，不连续补跑）、
+  单组件崩溃 catch_unwind 隔离（其他组件无感）、锁屏/节能/全屏全组件暂停；
+  首发组件前两个：时钟（1s）、系统监控（2s，Linux /proc 完整实现）
+- Windows 渲染窗口（D2D）与遮挡检测（WindowFromPoint / DWM 事件）留待真机阶段，
+  数据层已可在线运行（demo / CI 链路验证）
+
 **v0.2 已落地**（§3 模块 C + §6 v0.2）：
 - `orange-taskbar`：`SetWindowCompositionAttribute` 主路径（运行时动态解析，
   undocumented API）、能力探测降级链（Acrylic → Blur → Clear → Native，
@@ -44,6 +52,7 @@ crates/orange-kernel    微内核：只做总线 / 预算 / 注册 / 守护四�
 crates/orange-module-api 模块契约：IModule 生命周期、KernelEvent、资源预算
 crates/orange-wallpaper 壁纸模块：拓扑适配 + DComp flip-model 渲染
 crates/orange-taskbar   任务栏透明模块：composition API + 规则引擎 + 能力降级
+crates/orange-widgets   小组件系统：IWidget 契约 + EDF 调度器 + 崩溃隔离
 tools/perf-bench        性能采样脚本（CI 门禁数据源）
 ```
 
