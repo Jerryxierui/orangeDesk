@@ -1,0 +1,110 @@
+//! orangeDesk 常驻主程序。
+//!
+//! v0.1：内核宿主进程（单实例 → 配置 → 模块装配 → supervisor 事件循环）。
+//! Shell UI（设置 / 壁纸库 / 仪表盘）按架构为卫星进程，v0.2 接入。
+
+use std::process::ExitCode;
+
+use orange_kernel::{config, single_instance, supervisor};
+use orange_module_api::Module;
+use orange_wallpaper::WallpaperModule;
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+struct CliOptions {
+    demo_events: bool,
+}
+
+fn parse_args() -> Result<CliOptions, String> {
+    let mut options = CliOptions { demo_events: false };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    for arg in &args {
+        match arg.as_str() {
+            "--demo-events" => options.demo_events = true,
+            "--version" | "-V" => {
+                println!("orangeDesk {VERSION}");
+                std::process::exit(0);
+            }
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
+            other => return Err(format!("unknown argument: {other}")),
+        }
+    }
+    Ok(options)
+}
+
+fn print_help() {
+    println!(
+        "orangeDesk {VERSION} — integrated desktop environment layer\n\
+         \n\
+         USAGE: orange-desk [OPTIONS]\n\
+         \n\
+         OPTIONS:\n\
+         \x20 --demo-events   Run a scripted event sequence (foreground/fullscreen/lock/power)\n\
+         \x20                 then exit; used to verify the module lifecycle chain in CI\n\
+         \x20 --version       Print version\n\
+         \x20 --help          Print this help"
+    );
+}
+
+fn init_logging(level: &str) {
+    // RUST_LOG 优先于配置文件（开发者覆盖）
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level))
+        .format_timestamp_millis()
+        .init();
+}
+
+fn main() -> ExitCode {
+    let options = match parse_args() {
+        Ok(options) => options,
+        Err(err) => {
+            eprintln!("error: {err}\ntry --help");
+            return ExitCode::from(2);
+        }
+    };
+
+    // 单实例互斥（内核守护职责之一）
+    if let Err(err) = single_instance::acquire() {
+        eprintln!("orangeDesk: {err}");
+        return ExitCode::from(3);
+    }
+
+    // 配置加载 / 首启动默认值填充（P2）
+    let (app_config, config_path) = match config::load_or_create() {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            eprintln!("orangeDesk: config error: {err}");
+            return ExitCode::from(4);
+        }
+    };
+    init_logging(&app_config.logging.level);
+    log::info!(
+        "orangeDesk {VERSION} starting (config: {})",
+        config_path.display()
+    );
+
+    // 模块装配：新增能力 = 在此注册一个新模块，不触碰内核
+    // （v0.2+：taskbar / widgets / window-material）
+    let modules: Vec<Box<dyn Module>> = vec![Box::new(WallpaperModule::new())];
+
+    let report = supervisor::run(
+        app_config.modules.clone(),
+        modules,
+        supervisor::SupervisorOptions {
+            demo_events: options.demo_events,
+        },
+    );
+
+    // 退出摘要（P6：降级与隔离用户可见）
+    println!("— orangeDesk session summary —");
+    println!("  online : {}", report.online_modules.join(", "));
+    for (module, reason) in &report.offline_modules {
+        println!("  offline: {module} — {reason}");
+    }
+    for module in &report.crashed_modules {
+        println!("  crashed (isolated): {module}");
+    }
+    ExitCode::SUCCESS
+}

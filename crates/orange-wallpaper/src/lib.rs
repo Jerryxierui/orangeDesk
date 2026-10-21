@@ -1,0 +1,386 @@
+//! orangeDesk 壁纸模块（§3 模块 A）。
+//!
+//! 技术路线（D1/D3，吸取 FeatherWall / Wallpaper Engine 经验）：
+//! - 拓扑适配层一等公民：Classic（WorkerW）/ Raised（Win11 24H2+ Progman 子窗口）
+//!   双路径 + 回退，运行时探测
+//! - 渲染管线按 DirectComposition flip-model 提交模型设计；GDI/blt 永不作为主路径
+//! - 暂停而非降帧：全屏独占 / DRM / 锁屏 / 电池节能 → 完全暂停渲染 + 显存 Trim
+//!
+//! v0.1 范围：拓扑探测 + 挂载 + 纯色 DComp 渲染骨架；图片 / 视频解码
+//! （WIC / video processor blit）在 v0.1 内后续补齐，本文件 TODO 标注。
+
+use orange_module_api::{
+    DegradeLevel, KernelEvent, Module, ModuleConfig, ModuleDeclaration, ModuleError, ModuleStatus,
+    ResourceBudget,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+
+#[cfg(windows)]
+mod mount;
+#[cfg(windows)]
+mod renderer;
+#[cfg(windows)]
+mod topology;
+
+/// 帧率档位（§3 A-1：30 / 60 / 120 / 无限，双缓冲 + VSync）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FpsTier {
+    T30,
+    T60,
+    T120,
+    Unlimited,
+}
+
+impl FpsTier {
+    /// 目标帧间隔（ms）；Unlimited = 0（仅 VSync 对齐）
+    pub fn frame_interval_ms(self) -> u64 {
+        match self {
+            FpsTier::T30 => 33,
+            FpsTier::T60 => 16,
+            FpsTier::T120 => 8,
+            FpsTier::Unlimited => 0,
+        }
+    }
+}
+
+/// 壁纸内容模式。v0.1 实现纯色；图片 / 视频路径已预留配置位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WallpaperMode {
+    Solid,
+    Image,
+    Video,
+}
+
+/// 壁纸模块配置段（modules.wallpaper），缺失时全部取默认值（P2）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WallpaperSettings {
+    pub mode: WallpaperMode,
+    /// 纯色壁纸颜色（#RRGGBB），默认品牌橙
+    pub solid_color: String,
+    pub image_path: Option<String>,
+    pub video_path: Option<String>,
+    pub fps_tier: FpsTier,
+}
+
+impl Default for WallpaperSettings {
+    fn default() -> Self {
+        Self {
+            mode: WallpaperMode::Solid,
+            solid_color: "#F76B1C".to_string(),
+            image_path: None,
+            video_path: None,
+            fps_tier: FpsTier::T60,
+        }
+    }
+}
+
+/// 解析 `#RRGGBB` 为线性 RGBA（0.0–1.0，D3D Clear 使用 sRGB 数值直接输出）
+pub fn parse_hex_color(input: &str) -> Option<[f32; 4]> {
+    let hex = input.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let byte = |range: std::ops::Range<usize>| u8::from_str_radix(&hex[range], 16).ok();
+    Some([
+        byte(0..2)? as f32 / 255.0,
+        byte(2..4)? as f32 / 255.0,
+        byte(4..6)? as f32 / 255.0,
+        1.0,
+    ])
+}
+
+/// 模块运行态（status() 的数据源）
+#[derive(Debug, Clone, PartialEq)]
+enum WallpaperState {
+    /// 初始化前
+    Created,
+    /// 正常运行（附降级说明，如 "solid fallback: video pipeline not yet implemented"）
+    Running { detail: String },
+    /// 完全暂停（全屏 / 锁屏 / 节能），渲染线程让出 GPU + Trim
+    Suspended { reason: String },
+    /// 不可用（能力探测失败 / 非 Windows），附原因
+    Offline { reason: String },
+}
+
+/// 壁纸模块
+pub struct WallpaperModule {
+    settings: WallpaperSettings,
+    state: WallpaperState,
+    #[cfg(windows)]
+    engine: Option<renderer::Renderer>,
+}
+
+impl WallpaperModule {
+    pub fn new() -> Self {
+        Self {
+            settings: WallpaperSettings::default(),
+            state: WallpaperState::Created,
+            #[cfg(windows)]
+            engine: None,
+        }
+    }
+
+    fn set_suspend_reason(reason: &str) -> String {
+        reason.to_string()
+    }
+
+    #[cfg(windows)]
+    fn start_engine(&mut self) -> Result<(), ModuleError> {
+        let topology = topology::probe();
+        log::info!("desktop topology: {topology:?}");
+        let color = parse_hex_color(&self.settings.solid_color)
+            .unwrap_or_else(|| parse_hex_color("#F76B1C").expect("valid literal"));
+        // 挂载 + DComp 初始化在渲染线程内完成（窗口线程相关性）
+        let renderer = renderer::Renderer::spawn(
+            topology,
+            renderer::RenderConfig {
+                color,
+                frame_interval_ms: self.settings.fps_tier.frame_interval_ms(),
+            },
+        )
+        .map_err(ModuleError::Other)?;
+        self.engine = Some(renderer);
+        let detail = match self.settings.mode {
+            WallpaperMode::Solid => String::new(),
+            WallpaperMode::Image => {
+                // TODO(v0.1): WIC 解码 + D2D DrawBitmap 提交；当前回退纯色
+                "image pipeline pending, solid fallback".to_string()
+            }
+            WallpaperMode::Video => {
+                // TODO(v0.1): Media Foundation 硬解 + GPU video processor blit
+                // （flip-model 后缓冲禁止 UpdateSubresource / CPU 回写，A-1 纪律）
+                "video pipeline pending, solid fallback".to_string()
+            }
+        };
+        self.state = WallpaperState::Running { detail };
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn stop_engine(&mut self) {
+        if let Some(mut engine) = self.engine.take() {
+            if let Err(err) = engine.stop() {
+                log::warn!("wallpaper renderer stop: {err}");
+            }
+        }
+    }
+
+    /// explorer 重启 / 显示拓扑变化后重新挂载
+    #[cfg(windows)]
+    fn remount(&mut self) {
+        log::info!("wallpaper remount (shell restart / display change)");
+        self.stop_engine();
+        if let Err(err) = self.start_engine() {
+            self.state = WallpaperState::Offline {
+                reason: err.to_string(),
+            };
+        }
+    }
+}
+
+impl Default for WallpaperModule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Module for WallpaperModule {
+    fn declaration(&self) -> ModuleDeclaration {
+        // 预算对齐 §4：壁纸播放 <3% CPU / <120MB 内存（空闲时不渲染，接近 0）
+        ModuleDeclaration {
+            id: "wallpaper",
+            depends_on: BTreeSet::new(),
+            budget: ResourceBudget {
+                idle_cpu_percent: 3.0,
+                max_memory_mb: 120,
+                needs_gpu: true,
+            },
+            description: "wallpaper engine (topology-aware, DirectComposition flip-model)",
+        }
+    }
+
+    fn initialize(&mut self, config: &ModuleConfig) -> Result<(), ModuleError> {
+        self.settings = serde_json::from_value(config.clone()).unwrap_or_default();
+        #[cfg(windows)]
+        {
+            self.start_engine()
+        }
+        #[cfg(not(windows))]
+        {
+            // Windows 单平台产品（§10）；非 Windows 上走能力探测降级路径，
+            // 内核与其他模块照常运行（用于开发机 / CI 验证模块隔离）
+            self.state = WallpaperState::Offline {
+                reason: "wallpaper requires Windows (DirectComposition / WorkerW)".to_string(),
+            };
+            Err(ModuleError::Unsupported(
+                self.state_offline_reason().to_string(),
+            ))
+        }
+    }
+
+    fn on_event(&mut self, event: &KernelEvent) -> Result<(), ModuleError> {
+        match event {
+            // 性能底线：完全暂停而非降帧（§3 A-1）
+            KernelEvent::FullscreenChanged { fullscreen: true } => {
+                self.suspend_for("fullscreen app")
+            }
+            KernelEvent::LockScreenChanged { locked: true } => self.suspend_for("lock screen"),
+            KernelEvent::PowerSaverChanged { enabled: true } => self.suspend_for("power saver"),
+            KernelEvent::FullscreenChanged { fullscreen: false }
+            | KernelEvent::LockScreenChanged { locked: false }
+            | KernelEvent::PowerSaverChanged { enabled: false } => self.resume_from(),
+            // explorer 重启：WorkerW / Progman 层级重建，必须重挂载（模块 C 同款纪律）
+            KernelEvent::ShellRestarted | KernelEvent::DisplayChanged => {
+                #[cfg(windows)]
+                self.remount();
+                #[cfg(not(windows))]
+                {
+                    let _ = event;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn suspend(&mut self) -> Result<(), ModuleError> {
+        self.suspend_for("kernel suspend_all")
+    }
+
+    fn resume(&mut self) -> Result<(), ModuleError> {
+        self.resume_from()
+    }
+
+    fn finalize(&mut self) -> Result<(), ModuleError> {
+        #[cfg(windows)]
+        self.stop_engine();
+        self.state = WallpaperState::Offline {
+            reason: "finalized".to_string(),
+        };
+        Ok(())
+    }
+
+    fn status(&self) -> ModuleStatus {
+        let (level, detail) = match &self.state {
+            WallpaperState::Created => (DegradeLevel::Full, String::new()),
+            WallpaperState::Running { detail } => (DegradeLevel::Full, detail.clone()),
+            WallpaperState::Suspended { reason } => {
+                (DegradeLevel::Suspended, format!("suspended: {reason}"))
+            }
+            WallpaperState::Offline { reason } => (DegradeLevel::Suspended, reason.clone()),
+        };
+        ModuleStatus { level, detail }
+    }
+}
+
+impl WallpaperModule {
+    fn suspend_for(&mut self, reason: &str) -> Result<(), ModuleError> {
+        #[cfg(windows)]
+        if let Some(engine) = &self.engine {
+            engine.pause_and_trim();
+        }
+        self.state = WallpaperState::Suspended {
+            reason: Self::set_suspend_reason(reason),
+        };
+        log::info!("wallpaper suspended: {reason}");
+        Ok(())
+    }
+
+    fn resume_from(&mut self) -> Result<(), ModuleError> {
+        if matches!(self.state, WallpaperState::Suspended { .. }) {
+            #[cfg(windows)]
+            if let Some(engine) = &self.engine {
+                engine.unpause();
+            }
+            self.state = WallpaperState::Running {
+                detail: String::new(),
+            };
+            log::info!("wallpaper resumed");
+        }
+        Ok(())
+    }
+
+    fn state_offline_reason(&self) -> &str {
+        match &self.state {
+            WallpaperState::Offline { reason } => reason,
+            _ => "offline",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_settings_are_opinionated() {
+        // P2 默认即好看：品牌橙 + 60fps
+        let settings = WallpaperSettings::default();
+        assert_eq!(settings.mode, WallpaperMode::Solid);
+        assert_eq!(settings.solid_color, "#F76B1C");
+        assert_eq!(settings.fps_tier.frame_interval_ms(), 16);
+    }
+
+    #[test]
+    fn settings_parse_from_module_config_segment() {
+        let config = serde_json::json!({
+            "mode": "video",
+            "video_path": "C:/w/rain.mp4",
+            "fps_tier": "t120"
+        });
+        let settings: WallpaperSettings = serde_json::from_value(config).unwrap();
+        assert_eq!(settings.mode, WallpaperMode::Video);
+        assert_eq!(settings.fps_tier.frame_interval_ms(), 8);
+        // 缺失字段回默认
+        assert_eq!(settings.solid_color, "#F76B1C");
+    }
+
+    #[test]
+    fn missing_config_segment_uses_defaults() {
+        // 与 initialize 同路径：配置段为 Null / 缺失 → unwrap_or_default 兜底（P2）
+        let settings = serde_json::from_value::<WallpaperSettings>(serde_json::Value::Null)
+            .unwrap_or_default();
+        assert_eq!(settings, WallpaperSettings::default());
+    }
+
+    #[test]
+    fn hex_color_parses() {
+        assert_eq!(
+            parse_hex_color("#F76B1C"),
+            Some([247.0 / 255.0, 107.0 / 255.0, 28.0 / 255.0, 1.0])
+        );
+        assert_eq!(parse_hex_color("#000000"), Some([0.0, 0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn hex_color_rejects_garbage() {
+        assert_eq!(parse_hex_color("F76B1C"), None);
+        assert_eq!(parse_hex_color("#F76B"), None);
+        assert_eq!(parse_hex_color("#GGGGGG"), None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn initialize_offline_on_non_windows_with_clear_reason() {
+        let mut module = WallpaperModule::new();
+        let result = module.initialize(&serde_json::Value::Null);
+        assert!(
+            matches!(result, Err(ModuleError::Unsupported(reason)) if reason.contains("requires Windows"))
+        );
+        assert_eq!(module.status().level, DegradeLevel::Suspended);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn suspend_resume_lifecycle_transitions_visible_in_status() {
+        let mut module = WallpaperModule::new();
+        // 非 Windows：模块 offline，suspend/resume 不 panic
+        module.suspend_for("test").unwrap();
+        assert!(module.status().detail.contains("suspended: test"));
+        module.resume_from().unwrap();
+    }
+}

@@ -1,0 +1,18 @@
+[package]
+name = "orange-desk"
+description = "orangeDesk resident app: micro-kernel host process (tray UI arrives in v0.2 settings satellite)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "orange-desk"
+path = "src/main.rs"
+
+[dependencies]
+orange-kernel = { workspace = true }
+orange-module-api = { workspace = true }
+orange-wallpaper = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+serde_json = { workspace = true }

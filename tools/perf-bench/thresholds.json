@@ -1,0 +1,16 @@
+{
+  "_comment": "orangeDesk CI performance gate thresholds (design doc §4). Gating is enforced from v0.2 once the baseline on CI runners is established; numbers below are the product targets measured on mid-low end laptops.",
+  "measure_conditions": {
+    "cpu": "no user interaction, no fullscreen app",
+    "wallpaper": "1080p 30fps video wallpaper, hardware decode"
+  },
+  "targets": {
+    "resident_cpu_pct_idle": 0.8,
+    "wallpaper_cpu_pct_playing": 3.0,
+    "resident_mem_mb_idle": 60,
+    "resident_mem_mb_wallpaper": 120,
+    "taskbar_cpu_pct_idle": 0.5,
+    "widgets_cpu_pct_5core": 0.5,
+    "cold_start_to_tray_ms": 1000
+  }
+}

@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt-clippy-test:
+    name: check + clippy + test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows 是产品目标平台；ubuntu/macOS 保证内核逻辑（总线/注册/降级）跨平台可测
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all --check
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --workspace
+      - name: Release build
+        run: cargo build --workspace --release
+      - name: Smoke run (demo events)
+        # Windows runner 无交互桌面会话，壁纸模块应走能力探测降级而非崩溃（P3 验收）
+        run: cargo run --release -p orange-desk -- --demo-events
+        shell: bash
+
+  perf-gate:
+    # D6：性能预算是 CI 门禁，不是营销目标。
+    # v0.1 先落采样与产物归档；阈值门禁（超标 fail）在性能基线建立后启用。
+    name: Performance sampling baseline
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release
+        run: cargo build --release -p orange-desk
+      - name: Run with perf sampling
+        shell: pwsh
+        run: ./tools/perf-bench/sample.ps1 -BinaryPath ./target/release/orange-desk.exe -DurationSec 30 -OutDir ./perf-results
+      - name: Upload perf samples
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-samples
+          path: ./perf-results/
+          if-no-files-found: warn

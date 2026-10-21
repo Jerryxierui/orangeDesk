@@ -1,0 +1,12 @@
+[package]
+name = "orange-module-api"
+description = "orangeDesk module contract: IModule lifecycle, KernelEvent, resource budgets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }

@@ -1,0 +1,12 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Logs & local artifacts
+*.log
+/perf-results/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
