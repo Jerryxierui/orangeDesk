@@ -116,8 +116,18 @@ fn widget_worker(
     }
     log::info!("widgets: {} widget(s) scheduled (EDF)", widgets.len());
 
-    // 首轮立即刷新一次（P2：启动即有内容，不等第一个周期）
-    run_due_tick(&mut sched, &mut widgets, &mut sched_ids, &shared);
+    // 首轮立即刷新一次（P2：启动即有内容，不等第一个调度周期）——
+    // 直接逐个 update（insert 的截止都在未来，pop_due 首轮必空）
+    for index in (0..widgets.len()).rev() {
+        tick_one(
+            &mut sched,
+            &mut widgets,
+            &mut sched_ids,
+            &shared,
+            index,
+            now_ms(),
+        );
+    }
 
     let mut last_pause_state = false;
     loop {
@@ -176,24 +186,36 @@ fn run_due_tick(
         let Some(index) = sched_ids.iter().position(|id| *id == sched_id) else {
             continue;
         };
-        let display_name = widgets[index].metadata().display_name.to_string();
-        let outcome = catch_unwind(AssertUnwindSafe(|| widgets[index].update(now)));
-        match outcome {
-            Ok(Ok(())) => {
-                if let Ok(mut snapshot) = shared.lock() {
-                    snapshot.ticks += 1;
-                }
+        tick_one(sched, widgets, sched_ids, shared, index, now);
+    }
+}
+
+/// 更新单个组件；崩溃 / Crash 错误 → 隔离移除（其他组件无感，§6 v0.3 验收）。
+/// `index` 必须与 widgets / sched_ids 当前对齐；隔离会从两个列表同步移除。
+fn tick_one(
+    sched: &mut scheduler::WidgetScheduler,
+    widgets: &mut Vec<Box<dyn IWidget>>,
+    sched_ids: &mut Vec<u64>,
+    shared: &Mutex<HostShared>,
+    index: usize,
+    now: u64,
+) {
+    let display_name = widgets[index].metadata().display_name.to_string();
+    let outcome = catch_unwind(AssertUnwindSafe(|| widgets[index].update(now)));
+    match outcome {
+        Ok(Ok(())) => {
+            if let Ok(mut snapshot) = shared.lock() {
+                snapshot.ticks += 1;
             }
-            Ok(Err(err)) => {
-                // 组件自报错误：隔离移除（其他组件无感，§6 v0.3 验收）
-                log::error!("widgets: '{display_name}' failed, isolating: {err}");
-                isolate(sched, widgets, sched_ids, shared, index, &display_name);
-            }
-            Err(panic) => {
-                let reason = panic_message(&panic);
-                log::error!("widgets: '{display_name}' panicked, isolating: {reason}");
-                isolate(sched, widgets, sched_ids, shared, index, &display_name);
-            }
+        }
+        Ok(Err(err)) => {
+            log::error!("widgets: '{display_name}' failed, isolating: {err}");
+            isolate(sched, widgets, sched_ids, shared, index, &display_name);
+        }
+        Err(panic) => {
+            let reason = panic_message(&panic);
+            log::error!("widgets: '{display_name}' panicked, isolating: {reason}");
+            isolate(sched, widgets, sched_ids, shared, index, &display_name);
         }
     }
 }

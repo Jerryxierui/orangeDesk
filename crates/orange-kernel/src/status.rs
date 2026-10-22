@@ -22,6 +22,8 @@ pub struct StatusSnapshot {
     /// 进程级读数（macOS 开发机等无采样平台为 None）
     pub process: Option<ProcessSample>,
     pub modules: Vec<ModuleStatusRow>,
+    /// 预算表（§4/§5：声明预算 + 最近采样 + 判定，含 process.total）
+    pub budgets: Vec<crate::budget::BudgetReportRow>,
 }
 
 /// 单模块状态行
@@ -47,16 +49,18 @@ pub fn degrade_name(level: DegradeLevel) -> &'static str {
     }
 }
 
-/// 从注册中心状态 + 进程采样组装快照
+/// 从注册中心状态 + 进程采样 + 预算快照组装完整快照
 pub fn collect<'a>(
     states: impl Iterator<Item = &'a ModuleState>,
     process: Option<ProcessSample>,
+    budgets: Vec<crate::budget::BudgetReportRow>,
     timestamp_ms: u64,
 ) -> StatusSnapshot {
     StatusSnapshot {
         schema_version: STATUS_SCHEMA_VERSION,
         timestamp_ms,
         process,
+        budgets,
         modules: states
             .map(|state| ModuleStatusRow {
                 id: state.id.clone(),
@@ -124,15 +128,27 @@ mod tests {
                 cpu_percent: 0.4,
                 working_set_mb: 12.5,
             }),
+            vec![crate::budget::BudgetReportRow {
+                module: "process.total".to_string(),
+                declared: orange_module_api::ResourceBudget {
+                    idle_cpu_percent: 0.8,
+                    max_memory_mb: 60,
+                    needs_gpu: false,
+                },
+                last_sample: None,
+                verdict: crate::budget::BudgetVerdict::Within,
+            }],
             1_728_000_000_000,
         );
         assert_eq!(snapshot.schema_version, STATUS_SCHEMA_VERSION);
         assert_eq!(snapshot.modules.len(), 2);
         assert_eq!(snapshot.modules[1].degrade, "suspended");
+        assert_eq!(snapshot.budgets.len(), 1);
 
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(json.contains(r#""degrade":"full""#));
         assert!(json.contains(r#""cpu_percent":0.4"#));
+        assert!(json.contains(r#""verdict":"within""#));
         // roundtrip
         let back: StatusSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back, snapshot);
@@ -142,7 +158,7 @@ mod tests {
     fn file_roundtrip_is_atomic_and_readable() {
         let dir = std::env::temp_dir().join(format!("od-status-{}", std::process::id()));
         let path = dir.join("nested/status.json");
-        let snapshot = collect(std::iter::empty(), None, 42);
+        let snapshot = collect(std::iter::empty(), None, Vec::new(), 42);
         write_file(&snapshot, &path).unwrap();
         let loaded = read_file(&path).unwrap();
         assert_eq!(loaded, snapshot);

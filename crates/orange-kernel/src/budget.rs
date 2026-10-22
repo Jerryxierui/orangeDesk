@@ -10,16 +10,18 @@
 use std::collections::BTreeMap;
 
 use orange_module_api::{ModuleDeclaration, ResourceBudget};
+use serde::{Deserialize, Serialize};
 
 /// 一次资源采样
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct UsageSample {
     pub cpu_percent: f32,
     pub memory_mb: f32,
 }
 
 /// 预算判定结果
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BudgetVerdict {
     /// 预算内
     Within,
@@ -44,7 +46,7 @@ pub struct BudgetManager {
 }
 
 /// 仪表盘用快照行
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BudgetReportRow {
     pub module: String,
     pub declared: ResourceBudget,

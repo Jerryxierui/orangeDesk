@@ -370,6 +370,7 @@ fn run_render_loop_inner(
             DispatchMessageW, PeekMessageW, MSG, PM_REMOVE,
         };
         let mut pacer = crate::pacing::FramePacer::new(config.frame_interval_ms);
+        let mut last_restart: Option<std::time::Instant> = None;
         let mut msg = MSG::default();
         loop {
             if !controls.run.load(Ordering::SeqCst) {
@@ -408,10 +409,21 @@ fn run_render_loop_inner(
                         }
                     }
                     Ok(false) => {
-                        // EOF：循环重播（重建 SourceReader）
-                        if let Err(err) = pipeline.restart(&device) {
-                            log::error!("wallpaper: video loop restart failed: {err}");
-                            video = None;
+                        // EOF：循环重播（重建 SourceReader）。
+                        // 极短视频（亚秒级）EOF 会高频触发——重建节流 ≥1s 一次，
+                        // 防止每帧 open+init 解码器的 CPU 空转
+                        let restart_due =
+                            last_restart.is_none_or(|t| t.elapsed() >= Duration::from_secs(1));
+                        if restart_due {
+                            match pipeline.restart(&device) {
+                                Ok(()) => last_restart = Some(std::time::Instant::now()),
+                                Err(err) => {
+                                    log::error!("wallpaper: video loop restart failed: {err}");
+                                    video = None;
+                                }
+                            }
+                        } else {
+                            wait_for_message(Duration::from_millis(100));
                         }
                     }
                     Err(err) => {

@@ -52,7 +52,7 @@ pub enum DegradeLevel {
 }
 
 /// 模块声明的资源预算（§4 性能预算表的运行时镜像，CI 门禁与仪表盘共用）
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResourceBudget {
     /// 空闲态 CPU 占用上限（%）
     pub idle_cpu_percent: f32,

@@ -10,9 +10,9 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics, RegisterClassW, SetWindowPos,
-    HWND_BOTTOM, SET_WINDOW_POS_FLAGS, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_SHOWWINDOW,
-    SYSTEM_METRICS_INDEX, WM_NCACTIVATE, WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_VISIBLE,
+    HWND_BOTTOM, SET_WINDOW_POS_FLAGS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+    SWP_SHOWWINDOW, SYSTEM_METRICS_INDEX, WM_NCACTIVATE, WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_VISIBLE,
 };
 
 use crate::topology::DesktopTopology;
@@ -71,7 +71,9 @@ pub fn create_wallpaper_child(topology: &DesktopTopology) -> Result<HWND, String
         )
         .map_err(|err| format!("CreateWindowExW failed for wallpaper host: {err}"))?;
 
-        // 压到底部，避免遮挡桌面图标层（SHELLDLL_DefView）
+        // 压到底部，避免遮挡桌面图标层（SHELLDLL_DefView）。
+        // NOSIZE|NOMOVE 必须给：x/y/cx/cy 占位 0，无这两个 flag 会被解读为
+        // “移动到 (0,0) 并缩为 0×0”（真机上壁纸不可见的隐性 bug）
         let _ = SetWindowPos(
             hwnd,
             Some(HWND_BOTTOM),
@@ -79,7 +81,13 @@ pub fn create_wallpaper_child(topology: &DesktopTopology) -> Result<HWND, String
             0,
             0,
             0,
-            SET_WINDOW_POS_FLAGS(SWP_NOACTIVATE.0 | SWP_NOOWNERZORDER.0 | SWP_SHOWWINDOW.0),
+            SET_WINDOW_POS_FLAGS(
+                SWP_NOACTIVATE.0
+                    | SWP_NOOWNERZORDER.0
+                    | SWP_SHOWWINDOW.0
+                    | SWP_NOSIZE.0
+                    | SWP_NOMOVE.0,
+            ),
         );
         Ok(hwnd)
     }

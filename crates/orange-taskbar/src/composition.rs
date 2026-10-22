@@ -173,6 +173,9 @@ pub fn locate_taskbar_windows() -> Vec<HWND> {
 
     unsafe {
         let mut windows = Vec::new();
+        // 清理上一轮收集：explorer 重启后 relocate 在同线程再次枚举，
+        // 不清会累积失效句柄导致重复应用
+        FOUND.with(|f| f.borrow_mut().clear());
         // FindWindowW(lpclassname, lpwindowname)：按类名找主任务栏
         let class: Vec<u16> = "Shell_TrayWnd\0".encode_utf16().collect();
         if let Ok(hwnd) = FindWindowW(windows::core::PCWSTR(class.as_ptr()), None) {

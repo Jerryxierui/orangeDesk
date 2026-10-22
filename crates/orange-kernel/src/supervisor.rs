@@ -159,7 +159,8 @@ pub fn run(
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            let snapshot = crate::status::collect(registry.states(), sample, timestamp_ms);
+            let snapshot =
+                crate::status::collect(registry.states(), sample, budgets.snapshot(), timestamp_ms);
             if let Err(err) = crate::status::write_file(&snapshot, &crate::config::status_path()) {
                 log::warn!("status snapshot write failed: {err}");
             }
