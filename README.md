@@ -27,6 +27,12 @@ Windows 单平台优先（§10），Rust 内核 + 原生渲染，Apache-2.0。
   Linux /proc）、`process.total` 全产品预算（§4 空闲行）接入预算管理器——
   持续超标自动广播 `BudgetExceeded`；`ModuleStatus` 事件后刷新，
   session summary 按模块输出材质 / 降级说明
+- 仪表盘数据接口：supervisor 每 2s 原子写 `<config_dir>/status.json`（模块降级状态 +
+  进程读数 + 预算表含 verdict），`orange-desk --status` 读出（陈旧快照 >10s 警告）
+- 组件数据层补全（§3 B-3）：天气（open-meteo 解析 + WMO 码表，Provider trait 待真机接
+  WinHTTP）、媒体控制（MediaSource trait 待接 SMTC）、待办（JSON 原子存储，SQLite 迁移留口）
+- §5 降级矩阵首行落地：`BudgetExceeded`（process.total / wallpaper）→ 壁纸帧率
+  60→30→15→静态快照（暂停 + Trim），运行时跨线程调档，状态用户可见
 - v0.2 剩余：设置面板卫星进程（WinUI 3 / WPF，Windows 真机环境）与仪表盘 UI
 
 | v0.1 目标（文档 §6） | 状态 |

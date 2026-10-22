@@ -14,7 +14,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use orange_module_api::{
     DegradeLevel, KernelEvent, Module, ModuleConfig, ModuleDeclaration, ModuleError, ModuleStatus,
@@ -79,11 +79,9 @@ impl Default for WidgetHost {
     }
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+/// 调度时钟：单调（Instant）基线，NTP 校时 / 夏令时跳变不影响截止判定
+fn monotonic_ms(since: Instant) -> u64 {
+    since.elapsed().as_millis() as u64
 }
 
 /// 组装第一方组件（B-3 首发集合的前两个；天气 / 媒体控制 / 待办在渲染层后接入）
@@ -101,7 +99,8 @@ fn widget_worker(
     shared: Arc<Mutex<HostShared>>,
 ) {
     let mut sched = scheduler::WidgetScheduler::new();
-    let start = now_ms();
+    let clock = Instant::now();
+    let start = monotonic_ms(clock);
     let mut sched_ids: Vec<u64> = Vec::with_capacity(widgets.len());
     for widget in &widgets {
         let interval_ms = widget.metadata().update_interval.as_millis() as u64;
@@ -125,7 +124,7 @@ fn widget_worker(
             &mut sched_ids,
             &shared,
             index,
-            now_ms(),
+            monotonic_ms(clock),
         );
     }
 
@@ -155,8 +154,8 @@ fn widget_worker(
             last_pause_state = false;
         }
 
-        let now = now_ms();
-        run_due_tick(&mut sched, &mut widgets, &mut sched_ids, &shared);
+        let now = monotonic_ms(clock);
+        run_due_tick(&mut sched, &mut widgets, &mut sched_ids, &shared, clock);
 
         // 精确睡到下一个 EDF 截止（时钟 1s 周期 → 每秒仅 1 次唤醒、零空转）；
         // 上限 200ms 保证 stop / pause 标志的检查延迟（「1 秒内生效」纪律内）
@@ -180,8 +179,9 @@ fn run_due_tick(
     widgets: &mut Vec<Box<dyn IWidget>>,
     sched_ids: &mut Vec<u64>,
     shared: &Mutex<HostShared>,
+    clock: Instant,
 ) {
-    let now = now_ms();
+    let now = monotonic_ms(clock);
     for sched_id in sched.pop_due(now) {
         let Some(index) = sched_ids.iter().position(|id| *id == sched_id) else {
             continue;

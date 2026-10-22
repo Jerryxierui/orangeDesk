@@ -32,10 +32,12 @@ mod topology;
 #[cfg(windows)]
 mod video;
 
-/// 帧率档位（§3 A-1：30 / 60 / 120 / 无限，双缓冲 + VSync）
+/// 帧率档位（§3 A-1：30 / 60 / 120 / 无限，双缓冲 + VSync；
+/// T15 为 §5 降级矩阵的压力专用档）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FpsTier {
+    T15,
     T30,
     T60,
     T120,
@@ -46,10 +48,20 @@ impl FpsTier {
     /// 目标帧间隔（ms）；Unlimited = 0（仅 VSync 对齐）
     pub fn frame_interval_ms(self) -> u64 {
         match self {
+            FpsTier::T15 => 66,
             FpsTier::T30 => 33,
             FpsTier::T60 => 16,
             FpsTier::T120 => 8,
             FpsTier::Unlimited => 0,
+        }
+    }
+
+    /// §5 降级矩阵的下一档（60/120/无限 → 30 → 15 → None = 静态快照即暂停）
+    fn degrade_step(self) -> Option<FpsTier> {
+        match self {
+            FpsTier::Unlimited | FpsTier::T120 | FpsTier::T60 => Some(FpsTier::T30),
+            FpsTier::T30 => Some(FpsTier::T15),
+            FpsTier::T15 => None,
         }
     }
 }
@@ -119,6 +131,9 @@ enum WallpaperState {
 pub struct WallpaperModule {
     settings: WallpaperSettings,
     state: WallpaperState,
+    /// 当前生效帧率档位（settings 的运行副本；§5 降级矩阵只降不升，
+    /// 环境事件恢复（fullscreen false 等）不会回升档位，重启进程恢复）
+    fps_tier: FpsTier,
     #[cfg(windows)]
     engine: Option<renderer::Renderer>,
 }
@@ -128,6 +143,7 @@ impl WallpaperModule {
         Self {
             settings: WallpaperSettings::default(),
             state: WallpaperState::Created,
+            fps_tier: WallpaperSettings::default().fps_tier,
             #[cfg(windows)]
             engine: None,
         }
@@ -135,6 +151,28 @@ impl WallpaperModule {
 
     fn set_suspend_reason(reason: &str) -> String {
         reason.to_string()
+    }
+
+    /// §5 降级矩阵首行：预算压力下调帧率 60/120/无限 → 30 → 15 → 静态快照（暂停）。
+    /// 触发源：`BudgetExceeded`（当前为 process.total 全进程预算，模块级采样接入后
+    /// 同一入口对 wallpaper 生效）。
+    fn degrade_frame_rate(&mut self) {
+        let Some(next) = self.fps_tier.degrade_step() else {
+            log::error!("wallpaper: budget pressure at lowest tier, suspending to static snapshot");
+            let _ = self.suspend_for("budget exceeded (static snapshot)");
+            return;
+        };
+        self.fps_tier = next;
+        #[cfg(windows)]
+        if let Some(engine) = &self.engine {
+            engine.set_frame_interval(next.frame_interval_ms());
+        }
+        log::warn!("wallpaper: budget pressure, frame rate degraded to {next:?}");
+        if matches!(self.state, WallpaperState::Running { .. }) {
+            self.state = WallpaperState::Running {
+                detail: format!("frame rate degraded to {next:?} (budget pressure)"),
+            };
+        }
     }
 
     #[cfg(windows)]
@@ -182,7 +220,7 @@ impl WallpaperModule {
             topology,
             renderer::RenderConfig {
                 content,
-                frame_interval_ms: self.settings.fps_tier.frame_interval_ms(),
+                frame_interval_ms: self.fps_tier.frame_interval_ms(),
             },
         )
         .map_err(ModuleError::Other)?;
@@ -247,6 +285,7 @@ impl Module for WallpaperModule {
 
     fn initialize(&mut self, config: &ModuleConfig) -> Result<(), ModuleError> {
         self.settings = serde_json::from_value(config.clone()).unwrap_or_default();
+        self.fps_tier = self.settings.fps_tier;
         #[cfg(windows)]
         {
             self.start_engine()
@@ -282,6 +321,13 @@ impl Module for WallpaperModule {
                 #[cfg(not(windows))]
                 {
                     let _ = event;
+                }
+                Ok(())
+            }
+            // §5 降级矩阵：全进程或本模块持续超预算 → 帧率逐档下调直至静态快照
+            KernelEvent::BudgetExceeded { module } => {
+                if module == "process.total" || module == "wallpaper" {
+                    self.degrade_frame_rate();
                 }
                 Ok(())
             }
@@ -436,5 +482,57 @@ mod tests {
         module.suspend_for("test").unwrap();
         assert!(module.status().detail.contains("suspended: test"));
         module.resume_from().unwrap();
+    }
+
+    #[test]
+    fn fps_tier_degrade_step_follows_section5_matrix() {
+        // §5 矩阵：60 → 30 → 15 → 静态快照（None）；120 / 无限同入 30
+        assert_eq!(FpsTier::T60.degrade_step(), Some(FpsTier::T30));
+        assert_eq!(FpsTier::T120.degrade_step(), Some(FpsTier::T30));
+        assert_eq!(FpsTier::Unlimited.degrade_step(), Some(FpsTier::T30));
+        assert_eq!(FpsTier::T30.degrade_step(), Some(FpsTier::T15));
+        assert_eq!(FpsTier::T15.degrade_step(), None);
+        assert_eq!(FpsTier::T15.frame_interval_ms(), 66);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn budget_exceeded_walks_the_degradation_chain() {
+        let mut module = WallpaperModule::new();
+        assert_eq!(module.fps_tier, FpsTier::T60, "default tier");
+
+        // 第一次超标：60 → 30
+        module
+            .on_event(&KernelEvent::BudgetExceeded {
+                module: "process.total".into(),
+            })
+            .unwrap();
+        assert_eq!(module.fps_tier, FpsTier::T30);
+
+        // 第二次：30 → 15
+        module
+            .on_event(&KernelEvent::BudgetExceeded {
+                module: "process.total".into(),
+            })
+            .unwrap();
+        assert_eq!(module.fps_tier, FpsTier::T15);
+
+        // 第三次：已最低档 → 静态快照（Suspended + 用户可见原因）
+        module
+            .on_event(&KernelEvent::BudgetExceeded {
+                module: "process.total".into(),
+            })
+            .unwrap();
+        assert!(module
+            .status()
+            .detail
+            .contains("budget exceeded (static snapshot)"));
+
+        // 其他模块超预算不牵连壁纸
+        module
+            .on_event(&KernelEvent::BudgetExceeded {
+                module: "widgets".into(),
+            })
+            .unwrap();
     }
 }

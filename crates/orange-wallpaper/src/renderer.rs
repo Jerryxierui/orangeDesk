@@ -81,6 +81,8 @@ struct Controls {
     error: std::sync::Mutex<Option<String>>,
     /// 渲染线程 ID（0 = 尚未记录）；控制方法 PostThreadMessage 即时唤醒用
     thread_id: std::sync::atomic::AtomicU32,
+    /// 当前帧率档位间隔（ms）；§5 降级矩阵经 set_frame_interval 下调
+    frame_interval_ms: std::sync::atomic::AtomicU64,
 }
 
 /// 渲染器句柄：持有渲染线程，提供暂停 / 恢复 / 停止控制
@@ -98,6 +100,7 @@ impl Renderer {
             trimmed: AtomicBool::new(false),
             error: std::sync::Mutex::new(None),
             thread_id: std::sync::atomic::AtomicU32::new(0),
+            frame_interval_ms: std::sync::atomic::AtomicU64::new(config.frame_interval_ms.max(1)),
         });
         let thread_controls = controls.clone();
         let thread = thread::Builder::new()
@@ -153,6 +156,14 @@ impl Renderer {
     /// 渲染线程终止原因（None = 运行中或正常退出）；status / 仪表盘展示用（P6）
     pub fn render_error(&self) -> Option<String> {
         self.controls.error.lock().ok().and_then(|e| e.clone())
+    }
+
+    /// 运行时调整帧率档位（§5 降级矩阵：预算压力下调）；唤醒线程立即生效
+    pub fn set_frame_interval(&self, frame_interval_ms: u64) {
+        self.controls
+            .frame_interval_ms
+            .store(frame_interval_ms.max(1), Ordering::SeqCst);
+        self.wake();
     }
 }
 
@@ -392,6 +403,8 @@ fn run_render_loop_inner(
             }
 
             if let Some(pipeline) = video.as_mut() {
+                // §5 降级矩阵：档位可被 set_frame_interval 运行时下调，逐轮同步
+                pacer.set_interval(controls.frame_interval_ms.load(Ordering::SeqCst));
                 let now = std::time::Instant::now();
                 if !pacer.should_present(now) {
                     // 睡到下一帧截止（等消息可提前醒：停机 / 暂停即时生效）

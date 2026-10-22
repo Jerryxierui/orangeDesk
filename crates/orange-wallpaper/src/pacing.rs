@@ -32,6 +32,12 @@ impl FramePacer {
         self.last_present = Some(now);
     }
 
+    /// 运行时调整档位（§5 降级矩阵：预算压力下调 60→30→15）；
+    /// 已等待中的节奏在下次 should_present 判定时生效
+    pub fn set_interval(&mut self, frame_interval_ms: u64) {
+        self.interval = Duration::from_millis(frame_interval_ms);
+    }
+
     /// 距下一次到期的剩余时间（消息循环 sleep 用；Unlimited / 首帧为 0）
     pub fn until_next(&self, now: Instant) -> Duration {
         match self.last_present {

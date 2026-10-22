@@ -31,6 +31,19 @@ fn parse_args() -> Result<CliOptions, String> {
             "--status" => {
                 match orange_kernel::status::read_file(&orange_kernel::config::status_path()) {
                     Ok(snapshot) => {
+                        // 新鲜度检查：采样周期 2s，超 10s 未更新 = 实例大概率已退出，
+                        // 剩下的是崩溃 / 被杀前的最后快照（P6：不把陈旧数据当好数据）
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        let age_ms = now_ms.saturating_sub(snapshot.timestamp_ms);
+                        if age_ms > 10_000 {
+                            eprintln!(
+                                "warning: snapshot is {} s old — the instance may have exited",
+                                age_ms / 1000
+                            );
+                        }
                         println!(
                             "{}",
                             serde_json::to_string_pretty(&snapshot)
