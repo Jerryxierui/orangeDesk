@@ -23,7 +23,10 @@ use orange_module_api::{
 use std::collections::BTreeSet;
 
 pub mod contract;
+pub mod media;
 pub mod scheduler;
+pub mod todo;
+pub mod weather;
 pub mod widgets;
 
 use contract::IWidget;

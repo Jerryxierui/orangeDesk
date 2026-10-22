@@ -136,7 +136,8 @@ pub fn run(
         }
         if last_sample.elapsed() >= SAMPLE_INTERVAL {
             last_sample = Instant::now();
-            if let Some(sample) = crate::sampling::sample() {
+            let sample = crate::sampling::sample();
+            if let Some(sample) = sample {
                 let usage = UsageSample {
                     cpu_percent: sample.cpu_percent,
                     memory_mb: sample.working_set_mb,
@@ -151,6 +152,16 @@ pub fn run(
                         module: "process.total".to_string(),
                     });
                 }
+            }
+            // 仪表盘快照落盘（P6：--status / 设置面板卫星进程消费；
+            // 无采样平台仍写模块降级状态）
+            let timestamp_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let snapshot = crate::status::collect(registry.states(), sample, timestamp_ms);
+            if let Err(err) = crate::status::write_file(&snapshot, &crate::config::status_path()) {
+                log::warn!("status snapshot write failed: {err}");
             }
         }
     }

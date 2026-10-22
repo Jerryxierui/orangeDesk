@@ -76,6 +76,11 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.json")
 }
 
+/// 性能仪表盘快照文件（supervisor 周期写入，`--status` / 卫星进程读取）
+pub fn status_path() -> PathBuf {
+    config_dir().join("status.json")
+}
+
 /// 加载配置；文件不存在时写入默认配置（首启动体验：零配置直接可跑）。
 ///
 /// 返回 (config, 实际路径)。读取失败时给出明确错误（P3：绝不静默吞配置损坏）。

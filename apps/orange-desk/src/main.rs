@@ -27,6 +27,23 @@ fn parse_args() -> Result<CliOptions, String> {
                 println!("orangeDesk {VERSION}");
                 std::process::exit(0);
             }
+            // 仪表盘数据接口：读取运行实例的快照并打印 JSON（P6）
+            "--status" => {
+                match orange_kernel::status::read_file(&orange_kernel::config::status_path()) {
+                    Ok(snapshot) => {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&snapshot)
+                                .unwrap_or_else(|_| "{}".to_string())
+                        );
+                        std::process::exit(0);
+                    }
+                    Err(err) => {
+                        eprintln!("no status available (is orangeDesk running?): {err}");
+                        std::process::exit(5);
+                    }
+                }
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -46,6 +63,8 @@ fn print_help() {
          OPTIONS:\n\
          \x20 --demo-events   Run a scripted event sequence (foreground/fullscreen/lock/power)\n\
          \x20                 then exit; used to verify the module lifecycle chain in CI\n\
+         \x20 --status        Print the running instance's dashboard snapshot as JSON\n\
+         \x20                 (modules, degrade states, process readings) and exit\n\
          \x20 --version       Print version\n\
          \x20 --help          Print this help"
     );

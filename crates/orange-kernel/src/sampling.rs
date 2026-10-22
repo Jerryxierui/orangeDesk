@@ -5,7 +5,7 @@
 //! 采样本身只在 supervisor 低频（秒级）触发，不构成轮询（P4）。
 
 /// 一次进程级采样
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProcessSample {
     /// 全机平均 CPU 百分比（§4 的 <0.8% 即此口径）
     pub cpu_percent: f32,

@@ -10,6 +10,7 @@ pub mod platform;
 pub mod registry;
 pub mod sampling;
 pub mod single_instance;
+pub mod status;
 pub mod supervisor;
 
 /// 内核级错误
