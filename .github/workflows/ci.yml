@@ -39,7 +39,7 @@ jobs:
   perf-gate:
     # D6：性能预算是 CI 门禁，不是营销目标。
     # v0.1 先落采样与产物归档；阈值门禁（超标 fail）在性能基线建立后启用。
-    name: Performance sampling baseline
+    name: Performance gate (memory budget, D6)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,9 +47,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build release
         run: cargo build --release -p orange-desk
-      - name: Run with perf sampling
+      - name: Run with perf sampling + budget gate
         shell: pwsh
-        run: ./tools/perf-bench/sample.ps1 -BinaryPath ./target/release/orange-desk.exe -DurationSec 30 -OutDir ./perf-results
+        run: ./tools/perf-bench/sample.ps1 -BinaryPath ./target/release/orange-desk.exe -DurationSec 30 -OutDir ./perf-results -Gate
       - name: Upload perf samples
         uses: actions/upload-artifact@v4
         with:

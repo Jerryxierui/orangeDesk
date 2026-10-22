@@ -145,12 +145,13 @@ fn widget_worker(
         let now = now_ms();
         run_due_tick(&mut sched, &mut widgets, &mut sched_ids, &shared);
 
-        // 睡到下一个截止（上限 50ms 保证 stop/pause 及时响应）
+        // 精确睡到下一个 EDF 截止（时钟 1s 周期 → 每秒仅 1 次唤醒、零空转）；
+        // 上限 200ms 保证 stop / pause 标志的检查延迟（「1 秒内生效」纪律内）
         let wake = sched
             .next_deadline_ms()
             .map(|d| d.saturating_sub(now))
-            .unwrap_or(50)
-            .min(50);
+            .unwrap_or(200)
+            .min(200);
         thread::sleep(Duration::from_millis(wake.max(1)));
     }
 

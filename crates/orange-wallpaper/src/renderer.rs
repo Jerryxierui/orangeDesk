@@ -79,6 +79,8 @@ struct Controls {
     trimmed: AtomicBool,
     /// 渲染线程的终止原因（None = 运行中 / 正常退出）；模块 status 读取（P6）
     error: std::sync::Mutex<Option<String>>,
+    /// 渲染线程 ID（0 = 尚未记录）；控制方法 PostThreadMessage 即时唤醒用
+    thread_id: std::sync::atomic::AtomicU32,
 }
 
 /// 渲染器句柄：持有渲染线程，提供暂停 / 恢复 / 停止控制
@@ -95,6 +97,7 @@ impl Renderer {
             pause: AtomicBool::new(false),
             trimmed: AtomicBool::new(false),
             error: std::sync::Mutex::new(None),
+            thread_id: std::sync::atomic::AtomicU32::new(0),
         });
         let thread_controls = controls.clone();
         let thread = thread::Builder::new()
@@ -109,20 +112,36 @@ impl Renderer {
         })
     }
 
+    /// 用线程消息唤醒阻塞在 MsgWaitForMultipleObjectsEx 的渲染线程
+    /// （线程已退出时 PostThreadMessage 失败，安全忽略）
+    fn wake(&self) {
+        let tid = self.controls.thread_id.load(Ordering::SeqCst);
+        if tid != 0 {
+            unsafe {
+                use windows::Win32::Foundation::{LPARAM, WPARAM};
+                use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_NULL};
+                let _ = PostThreadMessageW(tid, WM_NULL, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+
     /// 暂停渲染并触发显存 Trim（幂等；重复调用无额外开销）
     pub fn pause_and_trim(&self) {
         self.controls.pause.store(true, Ordering::SeqCst);
+        self.wake();
     }
 
     /// 恢复渲染
     pub fn unpause(&self) {
         self.controls.pause.store(false, Ordering::SeqCst);
         self.controls.trimmed.store(false, Ordering::SeqCst);
+        self.wake();
     }
 
     /// 停止渲染线程并回收资源（幂等）
     pub fn stop(&mut self) -> Result<(), String> {
         self.controls.run.store(false, Ordering::SeqCst);
+        self.wake();
         if let Some(handle) = self.thread.take() {
             handle
                 .join()
@@ -139,6 +158,12 @@ impl Renderer {
 
 /// 渲染线程主循环（负责 COM 生命周期包裹）
 fn run_render_loop(topology: DesktopTopology, config: RenderConfig, controls: &Controls) {
+    // 记录线程 ID：控制方法（stop/pause/unpause）PostThreadMessage 即时唤醒本线程
+    controls.thread_id.store(
+        unsafe { windows::Win32::System::Threading::GetCurrentThreadId() },
+        Ordering::SeqCst,
+    );
+
     // WIC 是 COM 组件：渲染线程 STA 初始化（S_OK / S_FALSE 均视为已初始化）
     #[cfg(windows)]
     let com_inited = {
@@ -336,9 +361,11 @@ fn run_render_loop_inner(
             }
         }
 
-        // 6. 帧循环：消息泵 + 控制标志。无高频轮询（P4）；
-        //    静态内容 50ms 心跳只为响应暂停 / 停机；视频模式由 FramePacer
-        //    按档位（30/60/120/Unlimited）驱动「解码一帧 → VP blt → Present(VSync)」。
+        // 6. 帧循环：消息泵 + 控制标志。等待用 MsgWaitForMultipleObjectsEx
+        //    （有消息或超时才醒）：静态内容空闲时线程纯睡眠、零轮询唤醒（P4）；
+        //    stop / pause 由控制方法 PostThreadMessage 即时唤醒；
+        //    视频模式由 FramePacer 按档位（30/60/120/Unlimited）驱动
+        //    「解码一帧 → VP blt → Present(VSync)」。
         use windows::Win32::UI::WindowsAndMessaging::{
             DispatchMessageW, PeekMessageW, MSG, PM_REMOVE,
         };
@@ -358,16 +385,16 @@ fn run_render_loop_inner(
                     dxgi_device.Trim();
                     log::info!("wallpaper: paused, GPU memory trimmed");
                 }
-                thread::sleep(Duration::from_millis(100));
+                // 等消息（unpause 的 PostThreadMessage 即时唤醒；超时兜底）
+                wait_for_message(Duration::from_millis(100));
                 continue;
             }
 
             if let Some(pipeline) = video.as_mut() {
                 let now = std::time::Instant::now();
                 if !pacer.should_present(now) {
-                    // 到期前小睡：既不空转也不睡过头（上限 8ms 保响应）
-                    let wait = pacer.until_next(now).min(Duration::from_millis(8));
-                    thread::sleep(wait);
+                    // 睡到下一帧截止（等消息可提前醒：停机 / 暂停即时生效）
+                    wait_for_message(pacer.until_next(now).min(Duration::from_millis(250)));
                     continue;
                 }
                 match pipeline.blt_next_frame(&swapchain) {
@@ -402,8 +429,9 @@ fn run_render_loop_inner(
                     }
                 }
             } else {
-                // 纯色 / 图片模式无脏数据，跳过 Present 以保持空闲占用接近 0
-                thread::sleep(Duration::from_millis(50));
+                // 纯色 / 图片模式无脏数据：阻塞等消息（stop / pause 经
+                // PostThreadMessage 即时唤醒），空闲时线程纯睡眠、零轮询（P4）
+                wait_for_message(Duration::from_millis(250));
             }
         }
 
@@ -632,5 +660,22 @@ unsafe fn draw_image_frame(
             return Err(format!("Present failed: {hr:?}"));
         }
         Ok(true)
+    }
+}
+
+/// 阻塞等待窗口 / 线程消息或超时（空闲时线程纯睡眠、零轮询唤醒，P4）。
+/// 控制方法用 PostThreadMessage 提前唤醒；超时兜底保证停机标志的检查延迟。
+fn wait_for_message(timeout: Duration) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MsgWaitForMultipleObjectsEx, MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS, QS_ALLINPUT,
+    };
+    let ms = timeout.as_millis().min(u32::MAX as u128) as u32;
+    unsafe {
+        let _ = MsgWaitForMultipleObjectsEx(
+            None,
+            ms,
+            QS_ALLINPUT,
+            MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS(0),
+        );
     }
 }

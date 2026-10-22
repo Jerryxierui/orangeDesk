@@ -1,12 +1,15 @@
 # orangeDesk performance sampler (D6: budgets are CI gates, not marketing targets)
 # Samples the resident process CPU / memory into CSV + JSON summary.
-# Threshold enforcement lands once the baseline is established (see thresholds.json).
+# With -Gate: enforces the memory budget from thresholds.json and exits non-zero on
+# breach (CPU is NOT gated on CI runners — noisy shared machines; memory is stable).
 param(
     [Parameter(Mandatory = $true)]
     [string]$BinaryPath,
     [int]$DurationSec = 30,
     [int]$IntervalMs = 500,
-    [string]$OutDir = "./perf-results"
+    [string]$OutDir = "./perf-results",
+    [switch]$Gate,
+    [string]$ThresholdsPath = ""  # defaults to <script dir>/thresholds.json
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,10 +62,25 @@ $summary = [pscustomobject]@{
     ws_mb_max      = [math]::Round((($rows | Measure-Object -Property working_set_mb -Maximum).Maximum), 2)
     ws_mb_last     = $rows[-1].working_set_mb
     handle_count_last = $rows[-1].handle_count
-    note           = "baseline collection; gate thresholds pending (tools/perf-bench/thresholds.json)"
+    note           = "memory gated; cpu not gated on CI runners (noisy shared machines)"
 }
 $summaryPath = Join-Path $OutDir "summary.json"
 $summary | ConvertTo-Json | Set-Content -Path $summaryPath
 
 Write-Host "[perf] wrote $csvPath"
 Write-Host ($summary | ConvertTo-Json)
+
+# --- D6 gate: memory budget enforcement (doc section 4: resident < 60MB idle) ---
+if ($Gate) {
+    if (-not $ThresholdsPath) {
+        $ThresholdsPath = Join-Path $PSScriptRoot "thresholds.json"
+    }
+    $thresholds = Get-Content $ThresholdsPath -Raw | ConvertFrom-Json
+    $limitMb = [double]$thresholds.targets.resident_mem_mb_idle
+    $measuredMb = [double]$summary.ws_mb_max
+    if ($measuredMb -gt $limitMb) {
+        Write-Host "::error::[gate] resident memory ${measuredMb} MB exceeds budget ${limitMb} MB (design doc section 4)"
+        exit 1
+    }
+    Write-Host "[gate] resident memory ${measuredMb} MB within budget ${limitMb} MB (D6)"
+}
