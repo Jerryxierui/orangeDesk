@@ -120,7 +120,9 @@ pub fn run(
     // 事件分发循环（250ms 心跳用于检查停机标志；无高频轮询，P4）。
     // 每 SAMPLE_INTERVAL 做一次进程级采样：喂给预算管理器（process.total）
     // 并在持续超标时广播 BudgetExceeded（P6 用户可见）。
+    // 每 60s 广播 MinuteTick（§13 F1 播放列表等分钟级定时功能的驱动源）。
     let mut last_sample = Instant::now() - SAMPLE_INTERVAL;
+    let mut last_minute = Instant::now();
     loop {
         match bus.recv_timeout(Duration::from_millis(250)) {
             Some(KernelEvent::ShutdownRequested) => {
@@ -133,6 +135,10 @@ pub fn run(
         if platform::shutdown_requested() {
             log::info!("shutdown requested via signal");
             break;
+        }
+        if last_minute.elapsed() >= Duration::from_secs(60) {
+            last_minute = Instant::now();
+            publisher.publish(KernelEvent::MinuteTick);
         }
         if last_sample.elapsed() >= SAMPLE_INTERVAL {
             last_sample = Instant::now();

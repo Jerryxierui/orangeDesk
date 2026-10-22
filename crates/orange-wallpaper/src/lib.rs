@@ -85,6 +85,91 @@ pub struct WallpaperSettings {
     pub image_path: Option<String>,
     pub video_path: Option<String>,
     pub fps_tier: FpsTier,
+    /// 播放列表（§13 F1，Wallpaper Engine 同款能力）：存在时覆盖
+    /// 单源 mode，按间隔在条目间轮换
+    pub playlist: Option<WallpaperPlaylist>,
+}
+
+/// 播放列表配置（modules.wallpaper.playlist）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WallpaperPlaylist {
+    /// 壁纸文件路径（图片 / 视频按扩展名识别）
+    pub entries: Vec<String>,
+    /// 切换间隔（分钟），最低 1
+    pub interval_min: u32,
+    /// 轮换顺序
+    pub order: PlaylistOrder,
+}
+
+impl Default for WallpaperPlaylist {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            interval_min: 30,
+            order: PlaylistOrder::Sequential,
+        }
+    }
+}
+
+/// 轮换顺序
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaylistOrder {
+    /// 顺序循环
+    Sequential,
+    /// 随机（种子可注入，测试确定性）
+    Random,
+}
+
+/// 播放列表调度状态（纯逻辑，跨平台可测）
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlaylistState {
+    entries: Vec<String>,
+    order: PlaylistOrder,
+    current: usize,
+    /// LCG 状态（Random 模式）；种子可注入保证测试确定性
+    rng: u64,
+}
+
+impl PlaylistState {
+    pub fn new(playlist: &WallpaperPlaylist, rng_seed: u64) -> Self {
+        Self {
+            entries: playlist.entries.clone(),
+            order: playlist.order,
+            current: 0,
+            rng: rng_seed.max(1),
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        !self.entries.is_empty()
+    }
+
+    pub fn current_path(&self) -> Option<&str> {
+        self.entries.get(self.current).map(|s| s.as_str())
+    }
+
+    /// 切到下一个条目（循环）；返回新条目路径，空列表返回 None
+    pub fn advance(&mut self) -> Option<&str> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        match self.order {
+            PlaylistOrder::Sequential => {
+                self.current = (self.current + 1) % self.entries.len();
+            }
+            PlaylistOrder::Random => {
+                // LCG 步进（数值哈希质量足够壁纸轮换场景）
+                self.rng = self
+                    .rng
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                self.current = ((self.rng >> 33) as usize) % self.entries.len();
+            }
+        }
+        self.current_path()
+    }
 }
 
 impl Default for WallpaperSettings {
@@ -95,6 +180,7 @@ impl Default for WallpaperSettings {
             image_path: None,
             video_path: None,
             fps_tier: FpsTier::T60,
+            playlist: None,
         }
     }
 }
@@ -112,6 +198,38 @@ pub fn parse_hex_color(input: &str) -> Option<[f32; 4]> {
         byte(4..6)? as f32 / 255.0,
         1.0,
     ])
+}
+
+/// 按扩展名把播放列表条目映射为内容源（§13 F1；未知扩展名 → 纯色降级）
+#[cfg(windows)]
+fn content_source_for_path(path: &str, fallback_color: [f32; 4]) -> renderer::ContentSource {
+    let lower = path.to_ascii_lowercase();
+    let is_video = [".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"]
+        .iter()
+        .any(|ext| lower.ends_with(ext));
+    if is_video {
+        renderer::ContentSource::Video {
+            path: path.to_string(),
+            fallback_color,
+        }
+    } else if lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".png")
+        || lower.ends_with(".bmp")
+        || lower.ends_with(".tif")
+        || lower.ends_with(".tiff")
+        || lower.ends_with(".gif")
+    {
+        renderer::ContentSource::Image {
+            path: path.to_string(),
+            fallback_color,
+        }
+    } else {
+        log::warn!("wallpaper: unrecognized extension, solid fallback ({path})");
+        renderer::ContentSource::Solid {
+            color: fallback_color,
+        }
+    }
 }
 
 /// 模块运行态（status() 的数据源）
@@ -134,6 +252,12 @@ pub struct WallpaperModule {
     /// 当前生效帧率档位（settings 的运行副本；§5 降级矩阵只降不升，
     /// 环境事件恢复（fullscreen false 等）不会回升档位，重启进程恢复）
     fps_tier: FpsTier,
+    /// 播放列表运行态（§13 F1；None = 单源模式）
+    playlist: Option<PlaylistState>,
+    /// 距下次播放列表切换剩余分钟（MinuteTick 递减）
+    minutes_to_switch: u32,
+    /// 暂停期间到期的切换（恢复后补执行，避免锁屏时重启引擎复活渲染）
+    pending_playlist_switch: bool,
     #[cfg(windows)]
     engine: Option<renderer::Renderer>,
 }
@@ -144,6 +268,9 @@ impl WallpaperModule {
             settings: WallpaperSettings::default(),
             state: WallpaperState::Created,
             fps_tier: WallpaperSettings::default().fps_tier,
+            playlist: None,
+            minutes_to_switch: 0,
+            pending_playlist_switch: false,
             #[cfg(windows)]
             engine: None,
         }
@@ -185,35 +312,48 @@ impl WallpaperModule {
         log::info!("desktop topology: {topology:?}");
         let fallback_color = parse_hex_color(&self.settings.solid_color)
             .unwrap_or_else(|| parse_hex_color("#F76B1C").expect("valid literal"));
-        // 内容源组装（P3：配置不可用时降级并有明确说明，不静默黑屏）
-        let content = match self.settings.mode {
-            WallpaperMode::Solid => renderer::ContentSource::Solid {
-                color: fallback_color,
-            },
-            WallpaperMode::Image => match &self.settings.image_path {
-                Some(path) => renderer::ContentSource::Image {
-                    path: path.clone(),
-                    fallback_color,
-                },
+        // 内容源组装（P3：配置不可用时降级并有明确说明，不静默黑屏）。
+        // 优先级：播放列表当前条目（§13 F1）> 单源 mode
+        let content = if let Some(playlist) = &self.playlist {
+            match playlist.current_path() {
+                Some(path) => content_source_for_path(path, fallback_color),
                 None => {
-                    log::warn!("wallpaper: image mode without image_path, solid fallback");
+                    log::warn!("wallpaper: playlist empty, solid fallback");
                     renderer::ContentSource::Solid {
                         color: fallback_color,
                     }
                 }
-            },
-            WallpaperMode::Video => match &self.settings.video_path {
-                Some(path) => renderer::ContentSource::Video {
-                    path: path.clone(),
-                    fallback_color,
+            }
+        } else {
+            match self.settings.mode {
+                WallpaperMode::Solid => renderer::ContentSource::Solid {
+                    color: fallback_color,
                 },
-                None => {
-                    log::warn!("wallpaper: video mode without video_path, solid fallback");
-                    renderer::ContentSource::Solid {
-                        color: fallback_color,
+                WallpaperMode::Image => match &self.settings.image_path {
+                    Some(path) => renderer::ContentSource::Image {
+                        path: path.clone(),
+                        fallback_color,
+                    },
+                    None => {
+                        log::warn!("wallpaper: image mode without image_path, solid fallback");
+                        renderer::ContentSource::Solid {
+                            color: fallback_color,
+                        }
                     }
-                }
-            },
+                },
+                WallpaperMode::Video => match &self.settings.video_path {
+                    Some(path) => renderer::ContentSource::Video {
+                        path: path.clone(),
+                        fallback_color,
+                    },
+                    None => {
+                        log::warn!("wallpaper: video mode without video_path, solid fallback");
+                        renderer::ContentSource::Solid {
+                            color: fallback_color,
+                        }
+                    }
+                },
+            }
         };
         // 挂载 + DComp 初始化在渲染线程内完成（窗口线程相关性）
         let renderer = renderer::Renderer::spawn(
@@ -286,6 +426,17 @@ impl Module for WallpaperModule {
     fn initialize(&mut self, config: &ModuleConfig) -> Result<(), ModuleError> {
         self.settings = serde_json::from_value(config.clone()).unwrap_or_default();
         self.fps_tier = self.settings.fps_tier;
+        // 播放列表运行态（§13 F1）：种子取启动时刻，保证随机模式不重复开局
+        if let Some(playlist) = self.settings.playlist.as_ref() {
+            if !playlist.entries.is_empty() {
+                let seed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0x9E3779B97F4A7C15);
+                self.minutes_to_switch = playlist.interval_min.max(1);
+                self.playlist = Some(PlaylistState::new(playlist, seed));
+            }
+        }
         #[cfg(windows)]
         {
             self.start_engine()
@@ -328,6 +479,44 @@ impl Module for WallpaperModule {
             KernelEvent::BudgetExceeded { module } => {
                 if module == "process.total" || module == "wallpaper" {
                     self.degrade_frame_rate();
+                }
+                Ok(())
+            }
+            // §13 F1 播放列表：分钟心跳递减，到期切换条目（重启引擎换源）
+            KernelEvent::MinuteTick => {
+                if let Some(playlist) = self.playlist.as_mut() {
+                    if self.minutes_to_switch > 1 {
+                        self.minutes_to_switch -= 1;
+                    } else {
+                        let next_path = playlist.advance().map(|s| s.to_string());
+                        let interval = self
+                            .settings
+                            .playlist
+                            .as_ref()
+                            .map(|p| p.interval_min.max(1))
+                            .unwrap_or(1);
+                        self.minutes_to_switch = interval;
+                        if let Some(path) = next_path {
+                            log::info!("wallpaper: playlist switched to {path}");
+                            if matches!(self.state, WallpaperState::Suspended { .. }) {
+                                // 暂停中（锁屏 / 全屏 / 节能）：只记账，恢复时再换源
+                                self.pending_playlist_switch = true;
+                            } else {
+                                #[cfg(windows)]
+                                {
+                                    self.remount();
+                                }
+                            }
+                            #[cfg(not(windows))]
+                            {
+                                if let WallpaperState::Running { .. } = self.state {
+                                    self.state = WallpaperState::Running {
+                                        detail: format!("playlist entry: {path}"),
+                                    };
+                                }
+                            }
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -398,6 +587,20 @@ impl WallpaperModule {
                 detail: String::new(),
             };
             log::info!("wallpaper resumed");
+            // 暂停期间到期的播放列表切换在此补执行（换源后从新条目恢复渲染）
+            if self.pending_playlist_switch {
+                self.pending_playlist_switch = false;
+                #[cfg(windows)]
+                self.remount();
+                #[cfg(not(windows))]
+                log::info!(
+                    "wallpaper: pending playlist switch applied ({})",
+                    self.playlist
+                        .as_ref()
+                        .and_then(|p| p.current_path().map(|s| s.to_string()))
+                        .unwrap_or_default()
+                );
+            }
         }
         Ok(())
     }
@@ -461,6 +664,124 @@ mod tests {
         assert_eq!(parse_hex_color("F76B1C"), None);
         assert_eq!(parse_hex_color("#F76B"), None);
         assert_eq!(parse_hex_color("#GGGGGG"), None);
+    }
+
+    fn playlist_cfg(
+        order: PlaylistOrder,
+        entries: &[&str],
+        interval_min: u32,
+    ) -> WallpaperSettings {
+        WallpaperSettings {
+            playlist: Some(WallpaperPlaylist {
+                entries: entries.iter().map(|s| s.to_string()).collect(),
+                interval_min,
+                order,
+            }),
+            ..WallpaperSettings::default()
+        }
+    }
+
+    #[test]
+    fn playlist_sequential_cycles_in_order() {
+        let cfg = playlist_cfg(PlaylistOrder::Sequential, &["a.jpg", "b.mp4", "c.png"], 30);
+        let mut state = PlaylistState::new(cfg.playlist.as_ref().unwrap(), 1);
+        assert_eq!(state.current_path(), Some("a.jpg"));
+        assert_eq!(state.advance(), Some("b.mp4"));
+        assert_eq!(state.advance(), Some("c.png"));
+        assert_eq!(state.advance(), Some("a.jpg"), "wraps around");
+    }
+
+    #[test]
+    fn playlist_random_is_deterministic_per_seed() {
+        let cfg = playlist_cfg(
+            PlaylistOrder::Random,
+            &["a.jpg", "b.jpg", "c.jpg", "d.jpg"],
+            5,
+        );
+        let mut s1 = PlaylistState::new(cfg.playlist.as_ref().unwrap(), 42);
+        let mut s2 = PlaylistState::new(cfg.playlist.as_ref().unwrap(), 42);
+        for _ in 0..8 {
+            let a = s1.advance().unwrap();
+            let b = s2.advance().unwrap();
+            assert_eq!(a, b, "same seed walks the same sequence");
+        }
+        // 不同种子序列大概率不同（弱断言防偶发翻转）
+        let mut s3 = PlaylistState::new(cfg.playlist.as_ref().unwrap(), 4242);
+        let seq_a: Vec<String> = (0..8).map(|_| s1.advance().unwrap().to_string()).collect();
+        let seq_b: Vec<String> = (0..8).map(|_| s3.advance().unwrap().to_string()).collect();
+        assert_ne!(seq_a, seq_b);
+    }
+
+    #[test]
+    fn playlist_empty_and_settings_parse() {
+        let state = PlaylistState::new(
+            &WallpaperPlaylist {
+                entries: vec![],
+                interval_min: 10,
+                order: PlaylistOrder::Sequential,
+            },
+            1,
+        );
+        assert!(!state.is_active());
+        assert_eq!(state.current_path(), None);
+
+        let json = serde_json::json!({
+            "playlist": {
+                "entries": ["C:/w/a.jpg", "D:/videos/rain.mp4"],
+                "interval_min": 15,
+                "order": "random"
+            }
+        });
+        let settings: WallpaperSettings = serde_json::from_value(json).unwrap();
+        let playlist = settings.playlist.unwrap();
+        assert_eq!(playlist.entries.len(), 2);
+        assert_eq!(playlist.order, PlaylistOrder::Random);
+        assert_eq!(playlist.interval_min, 15);
+        // 旧配置（无 playlist 字段）不受影响
+        let legacy: WallpaperSettings =
+            serde_json::from_value(serde_json::json!({"mode": "solid"})).unwrap();
+        assert!(legacy.playlist.is_none());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn minute_tick_drives_playlist_switch_with_pending_semantics() {
+        let mut module = WallpaperModule::new();
+        module.settings = playlist_cfg(PlaylistOrder::Sequential, &["a.jpg", "b.jpg"], 1);
+        module.minutes_to_switch = 1;
+        module.playlist = Some(PlaylistState::new(
+            module.settings.playlist.as_ref().unwrap(),
+            1,
+        ));
+        module.state = WallpaperState::Running {
+            detail: String::new(),
+        };
+
+        // 到期 tick：切换到 b.jpg（运行态立即生效——非 Windows 下仅更新状态）
+        module.on_event(&KernelEvent::MinuteTick).unwrap();
+        assert_eq!(
+            module.playlist.as_ref().unwrap().current_path(),
+            Some("b.jpg")
+        );
+        assert!(module.status().detail.contains("playlist entry: b.jpg"));
+        // interval 重新装填
+        assert_eq!(module.minutes_to_switch, 1);
+
+        // 暂停期间到期：只记账不切换状态细节，恢复时补执行
+        module.suspend_for("lock screen").unwrap();
+        module.on_event(&KernelEvent::MinuteTick).unwrap();
+        assert!(module.pending_playlist_switch);
+        module
+            .on_event(&KernelEvent::LockScreenChanged { locked: false })
+            .unwrap();
+        assert!(
+            !module.pending_playlist_switch,
+            "resume consumed the pending switch"
+        );
+        assert_eq!(
+            module.playlist.as_ref().unwrap().current_path(),
+            Some("a.jpg")
+        );
     }
 
     #[cfg(not(windows))]

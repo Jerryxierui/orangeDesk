@@ -36,6 +36,9 @@ pub enum KernelEvent {
     PowerSaverChanged { enabled: bool },
     /// 预算管理器：某模块持续超出资源预算（P6 用户可见）
     BudgetExceeded { module: String },
+    /// 分钟级心跳（F1 播放列表等低频定时功能的驱动源；
+    /// 内核每 60s 发布一次，禁止模块借此做高频工作）
+    MinuteTick,
 }
 
 /// 模块降级档位（§5 降级矩阵）。序数越大降级越深，性能仪表盘直接展示。

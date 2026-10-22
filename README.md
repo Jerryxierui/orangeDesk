@@ -50,6 +50,21 @@ Win11 23H2 / 24H2）拓扑不黑屏验证与视频路径真机调优（色彩空
 图片格式说明：WIC 内置 JPG / PNG / BMP / TIFF / GIF；WebP / AVIF 依赖系统编解码扩展
 （微软商店的 WebP / AV1 扩展），缺扩展时自动降级纯色并在日志给出原因（P3 不静默失败）。
 
+壁纸播放列表（§13 F1，Wallpaper Engine 同款能力）——`modules.wallpaper.playlist`：
+
+```json
+{
+  "playlist": {
+    "entries": ["C:/walls/dawn.jpg", "D:/videos/rain.mp4", "C:/walls/night.png"],
+    "interval_min": 30,
+    "order": "random"
+  }
+}
+```
+
+条目按扩展名自动识别图片 / 视频；顺序（sequential）或随机（random）循环；
+锁屏 / 全屏 / 节能期间到期的切换自动延迟到恢复后执行（不复活暂停的渲染）。
+
 ## 架构（§2：微内核 + 可插拔能力模块 + 拓扑适配层）
 
 ```
