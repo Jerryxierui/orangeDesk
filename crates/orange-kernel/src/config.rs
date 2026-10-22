@@ -19,6 +19,8 @@ pub struct AppConfig {
     /// 各模块配置段，键为模块 id
     pub modules: BTreeMap<String, serde_json::Value>,
     pub logging: LoggingSettings,
+    /// 当前激活皮肤文件路径（§13.2 L2；启动时加载并覆盖对应模块段）
+    pub active_skin: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -42,6 +44,7 @@ impl Default for AppConfig {
             schema_version: SCHEMA_VERSION,
             modules: BTreeMap::new(),
             logging: LoggingSettings::default(),
+            active_skin: None,
         }
     }
 }

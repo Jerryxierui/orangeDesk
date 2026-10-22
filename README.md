@@ -65,6 +65,16 @@ Win11 23H2 / 24H2）拓扑不黑屏验证与视频路径真机调优（色彩空
 条目按扩展名自动识别图片 / 视频；顺序（sequential）或随机（random）循环；
 锁屏 / 全屏 / 节能期间到期的切换自动延迟到恢复后执行（不复活暂停的渲染）。
 
+声明式皮肤（§13.2 L2）——一个 YAML 文件 = 一套完整桌面（壁纸 + 播放列表 +
+任务栏规则 + 组件开关 + v0.4 材质预留），见 [samples/midnight.yaml](./samples/midnight.yaml)：
+
+```bash
+orange-desk --skin samples/midnight.yaml   # 应用并持久化（config.json active_skin）
+```
+
+皮肤各段直接复用模块的配置 schema（零漂移）；出现的段覆盖同名模块配置，
+未出现的段保留用户设置（局部换装合法）；解析 / 校验错误全部即时可读。
+
 ## 架构（§2：微内核 + 可插拔能力模块 + 拓扑适配层）
 
 ```
@@ -74,6 +84,7 @@ crates/orange-module-api 模块契约：IModule 生命周期、KernelEvent、资
 crates/orange-wallpaper 壁纸模块：拓扑适配 + DComp flip-model 渲染
 crates/orange-taskbar   任务栏透明模块：composition API + 规则引擎 + 能力降级
 crates/orange-widgets   小组件系统：IWidget 契约 + EDF 调度器 + 崩溃隔离
+crates/orange-skin      声明式皮肤层（L2）：一个 YAML = 一套完整桌面
 tools/perf-bench        性能采样脚本（CI 门禁数据源）
 ```
 

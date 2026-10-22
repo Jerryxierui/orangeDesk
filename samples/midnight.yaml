@@ -1,0 +1,44 @@
+# orangeDesk declarative skin sample (doc section 13.2, L2)
+# One YAML file = one complete desktop. Present sections override the matching
+# module config; absent sections keep user settings (partial restyle is legal).
+# Apply with: orange-desk --skin samples/midnight.yaml
+
+skin:
+  name: midnight
+  author: orangeDesk
+  description: Dark minimal desktop — looping video wallpaper, acrylic taskbar, core widgets
+  version: 1
+
+wallpaper:
+  mode: video
+  video_path: D:/walls/rain.mp4
+  solid_color: "#101018"   # fallback fill if the video is unavailable
+  fps_tier: t60
+  playlist:                # comment out to pin a single wallpaper
+    entries:
+      - D:/walls/dawn.jpg
+      - D:/walls/rain.mp4
+      - D:/walls/night.png
+    interval_min: 30
+    order: random
+
+taskbar:
+  tint: "#CC000000"        # 80% black tint (AARRGGBB)
+  rules:                   # first match wins; see doc section 3 module C
+    - name: fullscreen-clear
+      kind: fullscreen
+      material: clear
+    - name: power-saver-clear
+      kind: powersaver
+      material: clear
+    - name: locked-native
+      kind: locked
+      material: native
+    - name: default-acrylic
+      kind: always
+      material: acrylic
+
+widgets:
+  enabled: [clock, sysmon] # subset of the first-party set; unknown ids warn only
+
+window_material: mica      # reserved for the v0.4 module (validated, not yet applied)

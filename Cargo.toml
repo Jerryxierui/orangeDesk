@@ -4,6 +4,7 @@ members = [
     "apps/orange-desk",
     "crates/orange-kernel",
     "crates/orange-module-api",
+    "crates/orange-skin",
     "crates/orange-taskbar",
     "crates/orange-wallpaper",
     "crates/orange-widgets",
@@ -16,6 +17,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 orange-module-api = { path = "crates/orange-module-api" }
+orange-skin = { path = "crates/orange-skin" }
 orange-kernel = { path = "crates/orange-kernel" }
 orange-taskbar = { path = "crates/orange-taskbar" }
 orange-wallpaper = { path = "crates/orange-wallpaper" }

@@ -15,14 +15,27 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 struct CliOptions {
     demo_events: bool,
+    /// 一次性指定皮肤（§13.2 L2）；会写回 config.json 的 active_skin 持久生效
+    skin: Option<String>,
 }
 
 fn parse_args() -> Result<CliOptions, String> {
-    let mut options = CliOptions { demo_events: false };
+    let mut options = CliOptions {
+        demo_events: false,
+        skin: None,
+    };
     let args: Vec<String> = std::env::args().skip(1).collect();
-    for arg in &args {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--demo-events" => options.demo_events = true,
+            "--skin" => {
+                options.skin = Some(
+                    iter.next()
+                        .cloned()
+                        .ok_or_else(|| "--skin requires a file path".to_string())?,
+                );
+            }
             "--version" | "-V" => {
                 println!("orangeDesk {VERSION}");
                 std::process::exit(0);
@@ -76,6 +89,9 @@ fn print_help() {
          OPTIONS:\n\
          \x20 --demo-events   Run a scripted event sequence (foreground/fullscreen/lock/power)\n\
          \x20                 then exit; used to verify the module lifecycle chain in CI\n\
+         \x20 --skin <file>   Activate a declarative skin (YAML, section 13.2 L2) and persist\n\
+         \x20                 it in config.json (active_skin); sections present in the skin\n\
+         \x20                 override matching module configs\n\
          \x20 --status        Print the running instance's dashboard snapshot as JSON\n\
          \x20                 (modules, degrade states, process readings) and exit\n\
          \x20 --version       Print version\n\
@@ -106,7 +122,7 @@ fn main() -> ExitCode {
     }
 
     // 配置加载 / 首启动默认值填充（P2）
-    let (app_config, config_path) = match config::load_or_create() {
+    let (mut app_config, config_path) = match config::load_or_create() {
         Ok(loaded) => loaded,
         Err(err) => {
             eprintln!("orangeDesk: config error: {err}");
@@ -118,6 +134,40 @@ fn main() -> ExitCode {
         "orangeDesk {VERSION} starting (config: {})",
         config_path.display()
     );
+
+    // 皮肤层（§13.2 L2）：--skin 一次性指定并持久化；active_skin 每次启动生效。
+    // 皮肤中出现的段覆盖同名模块段；未出现的段保留用户配置（局部换装合法）。
+    let skin_path = options
+        .skin
+        .clone()
+        .or_else(|| app_config.active_skin.clone());
+    if let Some(skin_path) = skin_path {
+        match orange_skin::load(std::path::Path::new(&skin_path)) {
+            Ok(skin) => {
+                let (overrides, notes) = orange_skin::compile(&skin);
+                for note in notes {
+                    log::info!("skin: {note}");
+                }
+                let section_count = overrides.len();
+                for (module_id, value) in overrides {
+                    log::info!("skin: overriding modules.{module_id}");
+                    app_config.modules.insert(module_id, value);
+                }
+                let changed = app_config.active_skin.as_deref() != Some(skin_path.as_str());
+                app_config.active_skin = Some(skin_path);
+                if changed {
+                    if let Err(err) = config::save(&app_config, &config_path) {
+                        log::warn!("cannot persist active_skin: {err}");
+                    }
+                }
+                log::info!("skin applied ({section_count} module section(s))");
+            }
+            Err(err) => {
+                eprintln!("orangeDesk: skin error: {err}");
+                return ExitCode::from(6);
+            }
+        }
+    }
 
     // 模块装配：新增能力 = 在此注册一个新模块，不触碰内核
     // （v0.4+：window-material）

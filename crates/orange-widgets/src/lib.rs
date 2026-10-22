@@ -92,6 +92,45 @@ fn build_first_party_widgets() -> Vec<Box<dyn IWidget>> {
     ]
 }
 
+/// 组件模块配置段（modules.widgets / 皮肤 widgets 段）
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct WidgetSettings {
+    /// 启用的组件 id 列表（按 metadata id 过滤首发集合；None/空 = 全部启用）。
+    /// 未知 id 记录警告后忽略（P3：不让皮肤里拼错的名字拖垮模块）
+    pub enabled: Option<Vec<String>>,
+}
+
+impl WidgetSettings {
+    /// 按配置过滤组件集合（返回保留列表 + 被过滤与未匹配的报告）
+    pub fn filter(
+        &self,
+        widgets: Vec<Box<dyn IWidget>>,
+    ) -> (Vec<Box<dyn IWidget>>, Vec<String>, Vec<String>) {
+        let Some(enabled) = self.enabled.as_ref().filter(|e| !e.is_empty()) else {
+            return (widgets, Vec::new(), Vec::new());
+        };
+        let mut kept = Vec::new();
+        let mut disabled = Vec::new();
+        let mut matched: Vec<&String> = Vec::new();
+        for widget in widgets {
+            let id = widget.metadata().id.to_string();
+            if enabled.iter().any(|e| e == &id) {
+                matched.push(enabled.iter().find(|e| *e == &id).unwrap());
+                kept.push(widget);
+            } else {
+                disabled.push(id);
+            }
+        }
+        let unknown: Vec<String> = enabled
+            .iter()
+            .filter(|e| !matched.contains(e))
+            .cloned()
+            .collect();
+        (kept, disabled, unknown)
+    }
+}
+
 /// 调度线程主循环（拥有全部 widget 与调度器，规避跨线程共享）
 fn widget_worker(
     mut widgets: Vec<Box<dyn IWidget>>,
@@ -263,8 +302,21 @@ impl Module for WidgetHost {
         }
     }
 
-    fn initialize(&mut self, _config: &ModuleConfig) -> Result<(), ModuleError> {
-        let widgets = build_first_party_widgets();
+    fn initialize(&mut self, config: &ModuleConfig) -> Result<(), ModuleError> {
+        // 皮肤 / 配置可选组件（§13 F3；解析失败 = 默认全开，不拖垮模块）
+        let settings: WidgetSettings = serde_json::from_value(config.clone()).unwrap_or_default();
+        let (widgets, disabled, unknown) = settings.filter(build_first_party_widgets());
+        for id in &disabled {
+            log::info!("widgets: '{id}' disabled by config/skin");
+        }
+        for id in &unknown {
+            log::warn!("widgets: enabled list references unknown widget '{id}' (ignored)");
+        }
+        if widgets.is_empty() {
+            return Err(ModuleError::Config(
+                "no widgets enabled (check modules.widgets.enabled)".to_string(),
+            ));
+        }
         if widgets.len() > MAX_WIDGETS {
             return Err(ModuleError::Config(format!(
                 "widget count {} exceeds hard cap {MAX_WIDGETS}",
