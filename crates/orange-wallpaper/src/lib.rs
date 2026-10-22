@@ -520,6 +520,48 @@ impl Module for WallpaperModule {
                 }
                 Ok(())
             }
+            // 热配置（§13 L3 / F3b）：场景切换下发新配置段，最小化重应用。
+            // 仅 fps_tier 变化 → 调档不重启；内容 / 播放列表变化 → 换源重启
+            KernelEvent::ModuleConfigChanged { config, .. } => {
+                let new_settings: WallpaperSettings =
+                    serde_json::from_value(config.clone()).unwrap_or_default();
+                let content_changed = new_settings.mode != self.settings.mode
+                    || new_settings.image_path != self.settings.image_path
+                    || new_settings.video_path != self.settings.video_path
+                    || new_settings.playlist != self.settings.playlist;
+                let fps_changed = new_settings.fps_tier != self.settings.fps_tier;
+                self.settings = new_settings;
+                if content_changed {
+                    log::info!("wallpaper: content config changed, re-applying source");
+                    self.playlist = None;
+                    self.pending_playlist_switch = false;
+                    #[cfg(windows)]
+                    if matches!(self.state, WallpaperState::Running { .. }) {
+                        self.remount();
+                    }
+                    // 重建播放列表运行态
+                    if let Some(playlist) = self.settings.playlist.as_ref() {
+                        if !playlist.entries.is_empty() {
+                            let seed = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_nanos() as u64)
+                                .unwrap_or(0x9E3779B97F4A7C15);
+                            self.minutes_to_switch = playlist.interval_min.max(1);
+                            self.playlist = Some(PlaylistState::new(playlist, seed));
+                        }
+                    }
+                }
+                if fps_changed {
+                    // 场景显式设定新档位（用户意图优先于历史降级档）
+                    self.fps_tier = self.settings.fps_tier;
+                    #[cfg(windows)]
+                    if let Some(engine) = &self.engine {
+                        engine.set_frame_interval(self.fps_tier.frame_interval_ms());
+                    }
+                    log::info!("wallpaper: fps tier changed to {:?}", self.fps_tier);
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }

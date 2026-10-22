@@ -75,6 +75,19 @@ orange-desk --skin samples/midnight.yaml   # 应用并持久化（config.json ac
 皮肤各段直接复用模块的配置 schema（零漂移）；出现的段覆盖同名模块配置，
 未出现的段保留用户设置（局部换装合法）；解析 / 校验错误全部即时可读。
 
+场景模式（§13.2 L3 / F3b）——多套皮肤组合 + 触发器自动切换（运行时热应用，
+进程不重启）。把 [samples/scenes.yaml](./samples/scenes.yaml) 放到配置目录：
+
+```bash
+orange-desk --scene game      # 手动激活并持久化（active_scene）
+# 触发器自动切换：前台进程匹配（如启动 Cyberpunk2077 → game 场景）、
+# 每日时间表（22:30 → night 场景）
+```
+
+场景切换 = 内核对各模块下发 `ModuleConfigChanged` 热配置事件：壁纸 diff 后
+仅调档或换源、任务栏重建规则即时重评估、组件集合热重载（失败自动回滚旧配置）——
+这也是配置热重载的公共地基（F9 热重载的机制已就位）。
+
 ## 架构（§2：微内核 + 可插拔能力模块 + 拓扑适配层）
 
 ```

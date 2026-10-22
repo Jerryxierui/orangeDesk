@@ -21,6 +21,8 @@ use std::path::Path;
 use orange_taskbar::TaskbarSettings;
 use orange_wallpaper::WallpaperSettings;
 use orange_widgets::WidgetSettings;
+
+pub mod scenes;
 use serde::{Deserialize, Serialize};
 
 /// 皮肤文件根结构（一个文件 = 一套完整桌面）

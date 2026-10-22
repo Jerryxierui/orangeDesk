@@ -17,12 +17,15 @@ struct CliOptions {
     demo_events: bool,
     /// 一次性指定皮肤（§13.2 L2）；会写回 config.json 的 active_skin 持久生效
     skin: Option<String>,
+    /// 手动激活场景（§13.2 L3）；写回 active_scene 并应用该场景段
+    scene: Option<String>,
 }
 
 fn parse_args() -> Result<CliOptions, String> {
     let mut options = CliOptions {
         demo_events: false,
         skin: None,
+        scene: None,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut iter = args.iter();
@@ -34,6 +37,13 @@ fn parse_args() -> Result<CliOptions, String> {
                     iter.next()
                         .cloned()
                         .ok_or_else(|| "--skin requires a file path".to_string())?,
+                );
+            }
+            "--scene" => {
+                options.scene = Some(
+                    iter.next()
+                        .cloned()
+                        .ok_or_else(|| "--scene requires a scene name".to_string())?,
                 );
             }
             "--version" | "-V" => {
@@ -169,6 +179,115 @@ fn main() -> ExitCode {
         }
     }
 
+    // 场景模式（§13.2 L3 / F3b）：加载场景包（默认 <config_dir>/scenes.yaml），
+    // 校验诊断；--scene 手动激活并持久化；运行时触发器经 supervisor 事件观察者评估
+    let scenes_path = config::config_dir().join("scenes.yaml");
+    let scene_pack = if scenes_path.exists() {
+        match orange_skin::scenes::load_pack(&scenes_path) {
+            Ok(pack) => {
+                for issue in orange_skin::scenes::validate_pack(&pack) {
+                    log::warn!("scenes: {issue}");
+                }
+                log::info!(
+                    "scene pack loaded: {} scene(s), {} trigger(s)",
+                    pack.scenes.len(),
+                    pack.triggers.len()
+                );
+                Some(pack)
+            }
+            Err(err) => {
+                log::warn!("scenes: pack ignored ({err})");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    if let Some(name) = options.scene.as_ref() {
+        let Some(pack) = scene_pack.as_ref() else {
+            eprintln!(
+                "orangeDesk: --scene requires a scene pack at {}",
+                scenes_path.display()
+            );
+            return ExitCode::from(7);
+        };
+        match pack.scenes.get(name) {
+            Some(scene) => {
+                for (module_id, value) in orange_skin::scenes::compile_scene(scene) {
+                    log::info!("scene '{name}': applying modules.{module_id}");
+                    app_config.modules.insert(module_id, value);
+                }
+                app_config.active_scene = Some(name.clone());
+                if let Err(err) = config::save(&app_config, &config_path) {
+                    log::warn!("cannot persist active_scene: {err}");
+                }
+                log::info!("scene '{name}' activated");
+            }
+            None => {
+                eprintln!(
+                    "orangeDesk: scene '{name}' not found (available: {})",
+                    pack.scenes.keys().cloned().collect::<Vec<_>>().join(", ")
+                );
+                return ExitCode::from(7);
+            }
+        }
+    } else if let (Some(pack), Some(active)) =
+        (scene_pack.as_ref(), app_config.active_scene.as_ref())
+    {
+        // 启动时应用上次激活的场景（触发器去抖初值与之一致）
+        if let Some(scene) = pack.scenes.get(active) {
+            for (module_id, value) in orange_skin::scenes::compile_scene(scene) {
+                app_config.modules.insert(module_id, value);
+            }
+            log::info!("scene '{active}' applied on startup");
+        }
+    }
+
+    // 触发器观察者（app 层逻辑；内核只回调，零场景知识）：
+    // ForegroundChanged → 前台匹配；MinuteTick → 时间表匹配；去抖后热应用
+    let event_observer = scene_pack.map(|pack| {
+        let active = std::sync::Arc::new(std::sync::Mutex::new(app_config.active_scene.clone()));
+        std::sync::Arc::new(
+            move |event: &orange_module_api::KernelEvent,
+                  publisher: &orange_kernel::bus::EventPublisher| {
+                let target = match event {
+                    orange_module_api::KernelEvent::ForegroundChanged { process_name } => {
+                        orange_skin::scenes::match_foreground(&pack, process_name)
+                    }
+                    orange_module_api::KernelEvent::MinuteTick => {
+                        orange_skin::scenes::match_schedule(
+                            &pack,
+                            orange_skin::scenes::local_minute_of_day(),
+                        )
+                    }
+                    _ => None,
+                };
+                let Some(name) = target else { return };
+                let mut guard = active.lock().unwrap();
+                if guard.as_deref() == Some(name.as_str()) {
+                    return; // 已激活：去抖，不重复下发
+                }
+                let Some(scene) = pack.scenes.get(&name) else {
+                    return;
+                };
+                for (module_id, value) in orange_skin::scenes::compile_scene(scene) {
+                    publisher.publish(orange_module_api::KernelEvent::ModuleConfigChanged {
+                        module: module_id,
+                        config: value,
+                    });
+                }
+                *guard = Some(name.clone());
+                log::info!("scene '{name}' activated by trigger");
+            },
+        )
+            as std::sync::Arc<
+                dyn Fn(&orange_module_api::KernelEvent, &orange_kernel::bus::EventPublisher)
+                    + Send
+                    + Sync,
+            >
+    });
+
     // 模块装配：新增能力 = 在此注册一个新模块，不触碰内核
     // （v0.4+：window-material）
     let modules: Vec<Box<dyn Module>> = vec![
@@ -182,6 +301,7 @@ fn main() -> ExitCode {
         modules,
         supervisor::SupervisorOptions {
             demo_events: options.demo_events,
+            event_observer,
         },
     );
 

@@ -1,0 +1,48 @@
+# orangeDesk scene pack sample (doc section 13.2, L3 / F3b)
+# Place at <config_dir>/scenes.yaml (e.g. %APPDATA%/orangeDesk/scenes.yaml).
+# A scene = a named combination of desktop configs; triggers switch scenes at
+# runtime without restarting (foreground app match, or daily HH:MM schedule).
+# Manual switch: orange-desk --scene game
+
+scenes:
+  work:
+    wallpaper:
+      mode: image
+      image_path: C:/walls/focus.jpg
+      fps_tier: t30            # work scene saves GPU
+    taskbar:
+      tint: "#CC000000"
+    widgets:
+      enabled: [clock, sysmon]
+
+  game:
+    wallpaper:
+      mode: solid              # performance floor: no wallpaper GPU work at all
+      solid_color: "#000000"
+    taskbar:
+      rules:
+        - { name: game-clear, kind: always, material: clear }
+    widgets:
+      enabled: [clock]         # minimal distraction
+
+  night:
+    wallpaper:
+      mode: video
+      video_path: D:/walls/fireplace.mp4
+      fps_tier: t30
+    taskbar:
+      tint: "#E6000000"        # darker tint at night
+    widgets:
+      enabled: [clock, sysmon]
+
+active: work
+
+triggers:
+  # Launch a game -> game scene (basename, case-insensitive substring)
+  - kind: foreground
+    scene: game
+    patterns: ["Cyberpunk2077", "cs2.exe", "dota2"]
+  # Evening -> night scene (local time, checked every minute)
+  - kind: schedule
+    scene: night
+    at: "22:30"

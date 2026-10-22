@@ -214,6 +214,28 @@ impl Module for TaskbarModule {
                 }
                 Ok(())
             }
+            // 热配置（§13 L3 / F3b）：场景切换 → 重建规则集并立即重评估
+            KernelEvent::ModuleConfigChanged { config, .. } => {
+                self.settings = serde_json::from_value(config.clone()).unwrap_or_default();
+                let rules = self
+                    .settings
+                    .rules
+                    .clone()
+                    .filter(|r| !r.is_empty())
+                    .unwrap_or_else(RuleEngine::default_rules);
+                self.engine = RuleEngine::new(rules);
+                log::info!(
+                    "taskbar: rules reloaded ({} rule(s))",
+                    self.engine.rules().len()
+                );
+                #[cfg(windows)]
+                self.reevaluate();
+                #[cfg(not(windows))]
+                {
+                    let _ = event;
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }

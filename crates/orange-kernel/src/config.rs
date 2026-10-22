@@ -21,6 +21,8 @@ pub struct AppConfig {
     pub logging: LoggingSettings,
     /// 当前激活皮肤文件路径（§13.2 L2；启动时加载并覆盖对应模块段）
     pub active_skin: Option<String>,
+    /// 当前激活场景名（§13.2 L3；触发器去抖初值与展示用）
+    pub active_scene: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -45,6 +47,7 @@ impl Default for AppConfig {
             modules: BTreeMap::new(),
             logging: LoggingSettings::default(),
             active_skin: None,
+            active_scene: None,
         }
     }
 }

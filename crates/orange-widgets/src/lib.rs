@@ -54,6 +54,8 @@ pub struct WidgetHost {
     controls: Arc<HostControls>,
     shared: Arc<Mutex<HostShared>>,
     worker: Option<JoinHandle<()>>,
+    /// 最近一次生效的配置段（热配置失败时回滚用）
+    last_config: ModuleConfig,
 }
 
 impl WidgetHost {
@@ -65,6 +67,7 @@ impl WidgetHost {
             }),
             shared: Arc::new(Mutex::new(HostShared::default())),
             worker: None,
+            last_config: serde_json::Value::Null,
         }
     }
 
@@ -331,6 +334,7 @@ impl Module for WidgetHost {
                 .spawn(move || widget_worker(widgets, controls, shared))
                 .map_err(|err| ModuleError::Other(format!("spawn widget worker: {err}")))?,
         );
+        self.last_config = config.clone();
         Ok(())
     }
 
@@ -343,6 +347,24 @@ impl Module for WidgetHost {
             KernelEvent::LockScreenChanged { locked: false }
             | KernelEvent::PowerSaverChanged { enabled: false }
             | KernelEvent::FullscreenChanged { fullscreen: false } => self.set_pause(false),
+            // 热配置（§13 L3 / F3b）：enabled 集合变化 → 重启 worker 换装组件。
+            // 停旧 worker（join 保证线程退出）再按新配置重建，隔离计数延续
+            KernelEvent::ModuleConfigChanged { config, .. } => {
+                let rollback = self.last_config.clone();
+                self.finalize()?;
+                log::info!("widgets: config changed, restarting worker");
+                match self.initialize(config) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        // 新配置不可用（如空集）：回滚到上一份生效配置，
+                        // 不让场景切换打死模块（P3）
+                        log::error!("widgets: new config rejected ({err}), rolling back");
+                        if self.initialize(&rollback).is_err() {
+                            log::error!("widgets: rollback failed, module degraded");
+                        }
+                    }
+                }
+            }
             _ => {}
         }
         Ok(())

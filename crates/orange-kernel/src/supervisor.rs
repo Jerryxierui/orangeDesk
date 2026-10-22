@@ -16,11 +16,17 @@ use crate::bus::EventBus;
 use crate::platform;
 use crate::registry::ModuleRegistry;
 
+/// 事件观察者：每个事件分发后回调，可向总线发布新事件（如 ModuleConfigChanged）
+pub type EventObserver =
+    std::sync::Arc<dyn Fn(&KernelEvent, &crate::bus::EventPublisher) + Send + Sync>;
+
 /// supervisor 选项
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct SupervisorOptions {
     /// 注入演示事件序列（启动后依次广播环境事件，验证模块响应链路；测试 / CI 用）
     pub demo_events: bool,
+    /// 事件观察者（§13 L3 场景触发器等 app 层逻辑）：内核保持零场景知识
+    pub event_observer: Option<EventObserver>,
 }
 
 /// 单模块的退出报告行（性能仪表盘数据；detail 为模块自述的降级/材质状态）
@@ -129,7 +135,12 @@ pub fn run(
                 log::info!("shutdown requested via event bus");
                 break;
             }
-            Some(event) => registry.dispatch(&event),
+            Some(event) => {
+                registry.dispatch(&event);
+                if let Some(observer) = options.event_observer.as_ref() {
+                    observer(&event, &publisher);
+                }
+            }
             None => {}
         }
         if platform::shutdown_requested() {
@@ -340,7 +351,10 @@ mod tests {
                 Box::new(failing),
                 Box::new(make("beta")),
             ],
-            SupervisorOptions { demo_events: true },
+            SupervisorOptions {
+                demo_events: true,
+                ..Default::default()
+            },
         );
 
         assert_eq!(report.online_modules, ["alpha", "beta"]);
