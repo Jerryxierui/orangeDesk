@@ -88,6 +88,39 @@ pub struct WallpaperSettings {
     /// 播放列表（§13 F1，Wallpaper Engine 同款能力）：存在时覆盖
     /// 单源 mode，按间隔在条目间轮换
     pub playlist: Option<WallpaperPlaylist>,
+    /// 每显示器独立覆盖（§3 A-3 / F1b）：键为设备名（如 `\\.\DISPLAY2`），
+    /// 值为该显示器的完整壁纸配置（**覆盖式**——不与全局字段合并；
+    /// 其中的 per_monitor 字段不再递归）。未列出的显示器用全局配置。
+    pub per_monitor: Option<std::collections::BTreeMap<String, WallpaperSettings>>,
+}
+
+impl WallpaperSettings {
+    /// 多显示器分配（F1b 纯逻辑）：按显示器枚举顺序返回每屏的有效配置。
+    /// 单显示器场景 = 全局配置自身，行为与历史完全一致。
+    pub fn resolve_for_monitors(
+        &self,
+        monitors: &[crate::monitor::MonitorEntry],
+    ) -> Vec<(String, WallpaperSettings)> {
+        monitors
+            .iter()
+            .map(|monitor| {
+                let effective = self
+                    .per_monitor
+                    .as_ref()
+                    .and_then(|pm| pm.get(&monitor.device))
+                    .cloned()
+                    .unwrap_or_else(|| self.strip_per_monitor());
+                (monitor.device.clone(), effective)
+            })
+            .collect()
+    }
+
+    /// 去掉 per_monitor 子表后的副本（避免继承时递归语义歧义）
+    fn strip_per_monitor(&self) -> WallpaperSettings {
+        let mut copy = self.clone();
+        copy.per_monitor = None;
+        copy
+    }
 }
 
 /// 播放列表配置（modules.wallpaper.playlist）
@@ -181,6 +214,7 @@ impl Default for WallpaperSettings {
             video_path: None,
             fps_tier: FpsTier::T60,
             playlist: None,
+            per_monitor: None,
         }
     }
 }
@@ -198,6 +232,43 @@ pub fn parse_hex_color(input: &str) -> Option<[f32; 4]> {
         byte(4..6)? as f32 / 255.0,
         1.0,
     ])
+}
+
+/// 按配置段组装内容源（F1b：每显示器配置独立走此路径；缺路径 → 纯色降级）
+#[cfg(windows)]
+fn content_source_from_settings(
+    settings: &WallpaperSettings,
+    fallback_color: [f32; 4],
+) -> renderer::ContentSource {
+    match settings.mode {
+        WallpaperMode::Solid => renderer::ContentSource::Solid {
+            color: fallback_color,
+        },
+        WallpaperMode::Image => match &settings.image_path {
+            Some(path) => renderer::ContentSource::Image {
+                path: path.clone(),
+                fallback_color,
+            },
+            None => {
+                log::warn!("wallpaper: image mode without image_path, solid fallback");
+                renderer::ContentSource::Solid {
+                    color: fallback_color,
+                }
+            }
+        },
+        WallpaperMode::Video => match &settings.video_path {
+            Some(path) => renderer::ContentSource::Video {
+                path: path.clone(),
+                fallback_color,
+            },
+            None => {
+                log::warn!("wallpaper: video mode without video_path, solid fallback");
+                renderer::ContentSource::Solid {
+                    color: fallback_color,
+                }
+            }
+        },
+    }
 }
 
 /// 按扩展名把播放列表条目映射为内容源（§13 F1；未知扩展名 → 纯色降级）
@@ -258,8 +329,9 @@ pub struct WallpaperModule {
     minutes_to_switch: u32,
     /// 暂停期间到期的切换（恢复后补执行，避免锁屏时重启引擎复活渲染）
     pending_playlist_switch: bool,
+    /// 每显示器渲染实例（F1b：设备名 → 引擎；单显示器 = 1 个元素）
     #[cfg(windows)]
-    engine: Option<renderer::Renderer>,
+    engines: Vec<(String, renderer::Renderer)>,
 }
 
 impl WallpaperModule {
@@ -272,7 +344,7 @@ impl WallpaperModule {
             minutes_to_switch: 0,
             pending_playlist_switch: false,
             #[cfg(windows)]
-            engine: None,
+            engines: Vec::new(),
         }
     }
 
@@ -291,7 +363,7 @@ impl WallpaperModule {
         };
         self.fps_tier = next;
         #[cfg(windows)]
-        if let Some(engine) = &self.engine {
+        for (_device, engine) in &self.engines {
             engine.set_frame_interval(next.frame_interval_ms());
         }
         log::warn!("wallpaper: budget pressure, frame rate degraded to {next:?}");
@@ -304,67 +376,71 @@ impl WallpaperModule {
 
     #[cfg(windows)]
     fn start_engine(&mut self) -> Result<(), ModuleError> {
-        // 多显示器 / DPI 摸底（v0.1 §6 专项：先收集拓扑与风险信号）
+        // 多显示器 / DPI 摸底（§6 专项）+ F1b 逐显示器独立壁纸
         let monitors = monitor::probe();
         log::info!("{}", monitors.report_text());
 
         let topology = topology::probe();
         log::info!("desktop topology: {topology:?}");
-        let fallback_color = parse_hex_color(&self.settings.solid_color)
-            .unwrap_or_else(|| parse_hex_color("#F76B1C").expect("valid literal"));
-        // 内容源组装（P3：配置不可用时降级并有明确说明，不静默黑屏）。
-        // 优先级：播放列表当前条目（§13 F1）> 单源 mode
-        let content = if let Some(playlist) = &self.playlist {
-            match playlist.current_path() {
-                Some(path) => content_source_for_path(path, fallback_color),
-                None => {
-                    log::warn!("wallpaper: playlist empty, solid fallback");
-                    renderer::ContentSource::Solid {
-                        color: fallback_color,
+
+        let assignments = self.settings.resolve_for_monitors(&monitors.monitors);
+        for (device, per_settings) in &assignments {
+            let fallback_color = parse_hex_color(&per_settings.solid_color)
+                .unwrap_or_else(|| parse_hex_color("#F76B1C").expect("valid literal"));
+            // 内容源组装（P3：配置不可用时降级并有明确说明，不静默黑屏）。
+            // 优先级：播放列表当前条目（模块级，所有显示器同步）> 单源 mode
+            let content = if let Some(playlist) = &self.playlist {
+                match playlist.current_path() {
+                    Some(path) => content_source_for_path(path, fallback_color),
+                    None => {
+                        log::warn!("wallpaper: playlist empty, solid fallback");
+                        renderer::ContentSource::Solid {
+                            color: fallback_color,
+                        }
                     }
                 }
+            } else {
+                content_source_from_settings(per_settings, fallback_color)
+            };
+            let monitor = monitors
+                .monitors
+                .iter()
+                .find(|m| &m.device == device)
+                .expect("assignment comes from the same monitor list");
+            let rect = crate::mount::TargetRect {
+                x: monitor.x,
+                y: monitor.y,
+                width: monitor.w,
+                height: monitor.h,
+            };
+            // 挂载 + DComp 初始化在渲染线程内完成（窗口线程相关性）
+            match renderer::Renderer::spawn(
+                topology,
+                renderer::RenderConfig {
+                    content,
+                    frame_interval_ms: per_settings.fps_tier.frame_interval_ms(),
+                    rect,
+                },
+            ) {
+                Ok(renderer) => {
+                    log::info!(
+                        "wallpaper: engine up on {device} ({}x{})",
+                        rect.width,
+                        rect.height
+                    );
+                    self.engines.push((device.clone(), renderer));
+                }
+                // 单显示器失败不拖垮其他显示器（P3）：记录后继续
+                Err(err) => {
+                    log::error!("wallpaper: engine failed on {device}: {err}");
+                }
             }
-        } else {
-            match self.settings.mode {
-                WallpaperMode::Solid => renderer::ContentSource::Solid {
-                    color: fallback_color,
-                },
-                WallpaperMode::Image => match &self.settings.image_path {
-                    Some(path) => renderer::ContentSource::Image {
-                        path: path.clone(),
-                        fallback_color,
-                    },
-                    None => {
-                        log::warn!("wallpaper: image mode without image_path, solid fallback");
-                        renderer::ContentSource::Solid {
-                            color: fallback_color,
-                        }
-                    }
-                },
-                WallpaperMode::Video => match &self.settings.video_path {
-                    Some(path) => renderer::ContentSource::Video {
-                        path: path.clone(),
-                        fallback_color,
-                    },
-                    None => {
-                        log::warn!("wallpaper: video mode without video_path, solid fallback");
-                        renderer::ContentSource::Solid {
-                            color: fallback_color,
-                        }
-                    }
-                },
-            }
-        };
-        // 挂载 + DComp 初始化在渲染线程内完成（窗口线程相关性）
-        let renderer = renderer::Renderer::spawn(
-            topology,
-            renderer::RenderConfig {
-                content,
-                frame_interval_ms: self.fps_tier.frame_interval_ms(),
-            },
-        )
-        .map_err(ModuleError::Other)?;
-        self.engine = Some(renderer);
+        }
+        if self.engines.is_empty() {
+            return Err(ModuleError::Other(
+                "no wallpaper engine could start on any display".to_string(),
+            ));
+        }
         let detail = match self.settings.mode {
             WallpaperMode::Solid => String::new(),
             WallpaperMode::Image if self.settings.image_path.is_none() => {
@@ -382,14 +458,14 @@ impl WallpaperModule {
 
     #[cfg(windows)]
     fn stop_engine(&mut self) {
-        if let Some(mut engine) = self.engine.take() {
+        for (device, mut engine) in self.engines.drain(..) {
             if let Err(err) = engine.stop() {
-                log::warn!("wallpaper renderer stop: {err}");
+                log::warn!("wallpaper renderer stop on {device}: {err}");
             }
         }
     }
 
-    /// explorer 重启 / 显示拓扑变化后重新挂载
+    /// explorer 重启 / 显示拓扑变化后重新挂载（全部实例）
     #[cfg(windows)]
     fn remount(&mut self) {
         log::info!("wallpaper remount (shell restart / display change)");
@@ -555,7 +631,7 @@ impl Module for WallpaperModule {
                     // 场景显式设定新档位（用户意图优先于历史降级档）
                     self.fps_tier = self.settings.fps_tier;
                     #[cfg(windows)]
-                    if let Some(engine) = &self.engine {
+                    for (_device, engine) in &self.engines {
                         engine.set_frame_interval(self.fps_tier.frame_interval_ms());
                     }
                     log::info!("wallpaper: fps tier changed to {:?}", self.fps_tier);
@@ -586,11 +662,11 @@ impl Module for WallpaperModule {
     fn status(&self) -> ModuleStatus {
         // 渲染线程终止（两条降级路径都失败）→ 最高降级档位 + 用户可见原因（P6）
         #[cfg(windows)]
-        if let Some(engine) = &self.engine {
+        for (device, engine) in &self.engines {
             if let Some(err) = engine.render_error() {
                 return ModuleStatus {
                     level: DegradeLevel::Suspended,
-                    detail: format!("render pipeline failed: {err}"),
+                    detail: format!("render pipeline failed on {device}: {err}"),
                 };
             }
         }
@@ -609,7 +685,7 @@ impl Module for WallpaperModule {
 impl WallpaperModule {
     fn suspend_for(&mut self, reason: &str) -> Result<(), ModuleError> {
         #[cfg(windows)]
-        if let Some(engine) = &self.engine {
+        for (_device, engine) in &self.engines {
             engine.pause_and_trim();
         }
         self.state = WallpaperState::Suspended {
@@ -622,7 +698,7 @@ impl WallpaperModule {
     fn resume_from(&mut self) -> Result<(), ModuleError> {
         if matches!(self.state, WallpaperState::Suspended { .. }) {
             #[cfg(windows)]
-            if let Some(engine) = &self.engine {
+            for (_device, engine) in &self.engines {
                 engine.unpause();
             }
             self.state = WallpaperState::Running {
@@ -752,6 +828,86 @@ mod tests {
         let seq_a: Vec<String> = (0..8).map(|_| s1.advance().unwrap().to_string()).collect();
         let seq_b: Vec<String> = (0..8).map(|_| s3.advance().unwrap().to_string()).collect();
         assert_ne!(seq_a, seq_b);
+    }
+
+    #[test]
+    fn per_monitor_settings_parse_and_resolve() {
+        use crate::monitor::MonitorEntry;
+
+        let json = serde_json::json!({
+            "mode": "video",
+            "video_path": "D:/w/rain.mp4",
+            "per_monitor": {
+                "\\\\.\\DISPLAY2": { "mode": "image", "image_path": "C:/w/focus.jpg" }
+            }
+        });
+        let settings: WallpaperSettings = serde_json::from_value(json).unwrap();
+        assert!(settings.per_monitor.is_some());
+
+        let monitors = vec![
+            MonitorEntry {
+                device: "\\\\.\\DISPLAY1".to_string(),
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+                primary: true,
+                dpi_x: 96,
+                dpi_y: 96,
+            },
+            MonitorEntry {
+                device: "\\\\.\\DISPLAY2".to_string(),
+                x: 1920,
+                y: 0,
+                w: 2560,
+                h: 1440,
+                primary: false,
+                dpi_x: 144,
+                dpi_y: 144,
+            },
+        ];
+        let assignments = settings.resolve_for_monitors(&monitors);
+        assert_eq!(assignments.len(), 2);
+        // 未覆盖的显示器继承全局（且不带 per_monitor 子表，避免递归歧义）
+        let (_, primary) = &assignments[0];
+        assert_eq!(primary.mode, WallpaperMode::Video);
+        assert!(primary.per_monitor.is_none());
+        // 覆盖的显示器完全用自己的配置（覆盖式，不合并）
+        let (_, secondary) = &assignments[1];
+        assert_eq!(secondary.mode, WallpaperMode::Image);
+        assert_eq!(secondary.image_path.as_deref(), Some("C:/w/focus.jpg"));
+        assert_eq!(
+            secondary.video_path, None,
+            "override does not merge with global"
+        );
+        // 混合 DPI 场景照常工作（每实例独立矩形）
+        assert_eq!(assignments[1].1.fps_tier, FpsTier::T60);
+    }
+
+    #[test]
+    fn per_monitor_unknown_devices_are_inert() {
+        use crate::monitor::MonitorEntry;
+        // 配置里引用不存在的显示器：resolve 时自然不命中，无副作用
+        let settings: WallpaperSettings = serde_json::from_value(serde_json::json!({
+            "mode": "solid",
+            "per_monitor": { "\\\\.\\DISPLAY9": { "mode": "solid", "solid_color": "#000000" } }
+        }))
+        .unwrap();
+        let monitors = vec![MonitorEntry {
+            device: "\\\\.\\DISPLAY1".to_string(),
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+            primary: true,
+            dpi_x: 96,
+            dpi_y: 96,
+        }];
+        let assignments = settings.resolve_for_monitors(&monitors);
+        assert_eq!(
+            assignments[0].1.solid_color, "#F76B1C",
+            "global default used"
+        );
     }
 
     #[test]

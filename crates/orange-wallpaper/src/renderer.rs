@@ -63,6 +63,8 @@ pub struct RenderConfig {
     pub content: ContentSource,
     /// 目标帧间隔（ms）；0 = 仅 VSync 对齐（视频模式使用，静态内容无关）
     pub frame_interval_ms: u64,
+    /// 目标显示器矩形（虚拟屏幕坐标；F1b 多显示器实例各自定位）
+    pub rect: crate::mount::TargetRect,
 }
 
 /// composition 路径的 DComp 树句柄（清理时断开 visual 用）
@@ -210,7 +212,7 @@ fn run_render_loop_inner(
 ) -> Result<(), String> {
     unsafe {
         // 1. 拓扑挂载（必须在渲染线程：窗口线程相关性）
-        let host = crate::mount::create_wallpaper_child(&topology)?;
+        let host = crate::mount::create_wallpaper_child(&topology, config.rect)?;
 
         // 2. D3D11 设备：硬件优先，失败回退 WARP 软件光栅
         //    （无 GPU / 无头会话如 CI runner；A-1 降级序列的起点）
@@ -326,7 +328,7 @@ fn run_render_loop_inner(
 
         // 5. 首帧：按内容源分发。静态内容（纯色 / 图片）脏标记驱动、绘制一次；
         //    视频模式建立解码管线，首帧由第 6 步循环按帧率档位立即提交。
-        let (screen_w, screen_h) = host_client_size(host);
+        let (screen_w, screen_h) = (config.rect.width as f32, config.rect.height as f32);
         let fallback_color = config.content.fallback_color();
         let mut video: Option<crate::video::VideoPipeline> = None;
         let mut mf_inited = false;
@@ -471,24 +473,6 @@ fn run_render_loop_inner(
         }
         log::info!("wallpaper: render thread exited cleanly");
         Ok(())
-    }
-}
-
-/// 宿主窗口客户区尺寸
-unsafe fn host_client_size(hwnd: windows::Win32::Foundation::HWND) -> (f32, f32) {
-    use windows::Win32::Foundation::RECT;
-    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
-
-    unsafe {
-        let mut rect = RECT::default();
-        if GetClientRect(hwnd, &mut rect).is_ok() && rect.right > 0 {
-            (
-                (rect.right - rect.left) as f32,
-                (rect.bottom - rect.top) as f32,
-            )
-        } else {
-            (1920.0, 1080.0)
-        }
     }
 }
 

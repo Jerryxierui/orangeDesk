@@ -10,6 +10,9 @@ scenes:
       mode: image
       image_path: C:/walls/focus.jpg
       fps_tier: t30            # work scene saves GPU
+      # Multi-monitor (F1b): per-device override by name (override semantics)
+      # per_monitor:
+      #   "\\\\.\\DISPLAY2": { mode: solid, solid_color: "#0A0A12" }
     taskbar:
       tint: "#CC000000"
     widgets:

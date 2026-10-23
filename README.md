@@ -65,6 +65,18 @@ Win11 23H2 / 24H2）拓扑不黑屏验证与视频路径真机调优（色彩空
 条目按扩展名自动识别图片 / 视频；顺序（sequential）或随机（random）循环；
 锁屏 / 全屏 / 节能期间到期的切换自动延迟到恢复后执行（不复活暂停的渲染）。
 
+多显示器独立壁纸（§3 A-3 / F1b）：每显示器一个挂载 + 渲染实例（混合 DPI 各自矩形），
+按设备名覆盖配置（覆盖式，未列出的显示器用全局配置）：
+
+```json
+{
+  "mode": "video", "video_path": "D:/w/rain.mp4",
+  "per_monitor": { "\\.\DISPLAY2": { "mode": "image", "image_path": "C:/w/focus.jpg" } }
+}
+```
+
+单显示器实例失败不拖垮其他显示器；皮肤 / 场景中的 wallpaper 段自动继承该能力。
+
 声明式皮肤（§13.2 L2）——一个 YAML 文件 = 一套完整桌面（壁纸 + 播放列表 +
 任务栏规则 + 组件开关 + v0.4 材质预留），见 [samples/midnight.yaml](./samples/midnight.yaml)：
 

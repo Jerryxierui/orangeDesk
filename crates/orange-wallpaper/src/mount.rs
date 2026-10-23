@@ -9,20 +9,33 @@
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics, RegisterClassW, SetWindowPos,
-    HWND_BOTTOM, SET_WINDOW_POS_FLAGS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
-    SWP_SHOWWINDOW, SYSTEM_METRICS_INDEX, WM_NCACTIVATE, WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, GetWindowRect, RegisterClassW, SetWindowPos, HWND_BOTTOM,
+    SET_WINDOW_POS_FLAGS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+    SWP_SHOWWINDOW, WM_NCACTIVATE, WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_VISIBLE,
 };
 
 use crate::topology::DesktopTopology;
 
 const CLASS_NAME: &str = "orangeDeskWallpaperHost\0";
 
-/// 在调用线程上创建壁纸宿主子窗口并挂载到拓扑给出的父窗口。
+/// 目标区域（虚拟屏幕坐标；F1b 多显示器：每实例定位到自己的显示器矩形）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// 在调用线程上创建壁纸宿主子窗口并挂载到拓扑给出的父窗口，
+/// 定位到 `rect`（虚拟屏幕坐标；坐标系换算见函数体注释）。
 ///
 /// 必须在渲染线程调用（窗口线程相关性：DComp target 与消息泵同线程）。
-pub fn create_wallpaper_child(topology: &DesktopTopology) -> Result<HWND, String> {
+pub fn create_wallpaper_child(
+    topology: &DesktopTopology,
+    rect: TargetRect,
+) -> Result<HWND, String> {
     unsafe {
         let parent = match topology {
             DesktopTopology::Classic { worker_w } => *worker_w,
@@ -46,11 +59,22 @@ pub fn create_wallpaper_child(topology: &DesktopTopology) -> Result<HWND, String
         // 重复注册（explorer 重启 / remount）返回 0，可安全忽略
         let _ = RegisterClassW(&wc);
 
-        // 覆盖宿主（v0.1：主显示器；多显示器独立壁纸是 v0.4 范围）
-        let (width, height) = parent_client_size(parent);
-        if width == 0 || height == 0 {
+        // 子窗口坐标相对父窗口客户区原点；WorkerW/Progman 覆盖虚拟屏幕且
+        // 无边框，客户区原点 = 父窗口原点（虚拟屏幕左上角，可能为负）。
+        // 用父窗口原点做偏移换算（真机校准点：若 24H2 Progman 原点语义
+        // 不同，仅此一处需要调整）。
+        let mut parent_rect = RECT::default();
+        let (offset_x, offset_y) = if GetWindowRect(parent, &mut parent_rect).is_ok() {
+            (parent_rect.left, parent_rect.top)
+        } else {
+            (0, 0)
+        };
+        let x = rect.x - offset_x;
+        let y = rect.y - offset_y;
+        if rect.width <= 0 || rect.height <= 0 {
             return Err(format!(
-                "mount parent has empty client area ({width}x{height})"
+                "target rect for wallpaper host is empty ({}x{} at {},{})",
+                rect.width, rect.height, rect.x, rect.y
             ));
         }
 
@@ -60,10 +84,10 @@ pub fn create_wallpaper_child(topology: &DesktopTopology) -> Result<HWND, String
             PCWSTR(class_name.as_ptr()),
             PCWSTR(title.as_ptr()),
             WS_CHILD | WS_VISIBLE,
-            0,
-            0,
-            width,
-            height,
+            x,
+            y,
+            rect.width,
+            rect.height,
             Some(parent),
             None,
             None,
@@ -90,21 +114,6 @@ pub fn create_wallpaper_child(topology: &DesktopTopology) -> Result<HWND, String
             ),
         );
         Ok(hwnd)
-    }
-}
-
-/// 宿主父窗口客户区尺寸；取不到时回退主屏幕尺寸
-unsafe fn parent_client_size(parent: HWND) -> (i32, i32) {
-    unsafe {
-        let mut rect = RECT::default();
-        if GetClientRect(parent, &mut rect).is_ok() && rect.right > 0 {
-            return (rect.right, rect.bottom);
-        }
-        // SM_CXSCREEN=0 / SM_CYSCREEN=1
-        (
-            GetSystemMetrics(SYSTEM_METRICS_INDEX(0)),
-            GetSystemMetrics(SYSTEM_METRICS_INDEX(1)),
-        )
     }
 }
 
