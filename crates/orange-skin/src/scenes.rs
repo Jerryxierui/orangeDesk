@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use orange_dock::DockSettings;
 use orange_taskbar::TaskbarSettings;
 use orange_wallpaper::WallpaperSettings;
 use orange_widgets::WidgetSettings;
@@ -42,6 +43,7 @@ pub struct Scene {
     pub wallpaper: Option<WallpaperSettings>,
     pub taskbar: Option<TaskbarSettings>,
     pub widgets: Option<WidgetSettings>,
+    pub dock: Option<DockSettings>,
 }
 
 /// 场景触发器

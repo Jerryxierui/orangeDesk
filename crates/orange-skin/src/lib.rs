@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use orange_dock::DockSettings;
 use orange_taskbar::TaskbarSettings;
 use orange_wallpaper::WallpaperSettings;
 use orange_widgets::WidgetSettings;
@@ -36,6 +37,8 @@ pub struct SkinFile {
     pub taskbar: Option<TaskbarSettings>,
     /// 组件段（modules.widgets：enabled 开关）
     pub widgets: Option<WidgetSettings>,
+    /// 悬浮 Dock 段（modules.dock；F7）
+    pub dock: Option<DockSettings>,
     /// 窗口材质（v0.4 模块预留；仅校验取值，暂不生效并提示）
     pub window_material: Option<WindowMaterialPreview>,
 }
@@ -126,6 +129,12 @@ pub fn compile(skin: &SkinFile) -> (BTreeMap<String, serde_json::Value>, Vec<Str
         modules.insert(
             "widgets".to_string(),
             serde_json::to_value(widgets).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Some(dock) = &skin.dock {
+        modules.insert(
+            "dock".to_string(),
+            serde_json::to_value(dock).unwrap_or(serde_json::Value::Null),
         );
     }
     if skin.window_material.is_some() {

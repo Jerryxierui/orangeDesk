@@ -6,6 +6,7 @@
 use std::process::ExitCode;
 
 use orange_audio::AudioModule;
+use orange_dock::DockModule;
 use orange_kernel::{config, single_instance, supervisor};
 use orange_module_api::Module;
 use orange_taskbar::TaskbarModule;
@@ -299,6 +300,7 @@ fn main() -> ExitCode {
         Box::new(WallpaperModule::new()),
         Box::new(TaskbarModule::new()),
         Box::new(WidgetHost::new()),
+        Box::new(DockModule::new()),
         Box::new(audio),
     ];
 

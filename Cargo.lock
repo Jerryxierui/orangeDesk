@@ -375,6 +375,7 @@ dependencies = [
  "env_logger",
  "log",
  "orange-audio",
+ "orange-dock",
  "orange-kernel",
  "orange-module-api",
  "orange-skin",
@@ -382,6 +383,17 @@ dependencies = [
  "orange-wallpaper",
  "orange-widgets",
  "serde_json",
+]
+
+[[package]]
+name = "orange-dock"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "orange-module-api",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -413,6 +425,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "log",
+ "orange-dock",
  "orange-taskbar",
  "orange-wallpaper",
  "orange-widgets",

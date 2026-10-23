@@ -1,0 +1,13 @@
+[package]
+name = "orange-dock"
+description = "orangeDesk floating dock module: launcher entries, running-state merge, launch command construction (render window on real HW)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+orange-module-api = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

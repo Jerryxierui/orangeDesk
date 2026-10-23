@@ -106,6 +106,13 @@ WASAPI loopback 抓取系统混音（事件驱动、零轮询），FFT → 16 �
 `spectrum` 组件已内置（unicode 条形图，D2D 渲染层上线后升级为柱状图），
 壁纸渲染响应（音频可视化叠加）待真机阶段接入。预算 0.3% CPU / 10MB。
 
+悬浮 Dock（§13 F7，Nexus/Seelen 式启动器；**新增**顶层窗口，不替换任务栏）：
+数据层就绪——`modules.dock` 配置停靠边/对齐/尺寸/透明度/自动隐藏 + 固定项
+（应用路径、shell:URI、协议链接均可作 target）；运行状态合并（exe 基名大小写
+不敏感匹配、前台激活高亮）；启动命令构造（引号感知参数分词）。DComp 渲染
+窗口（圆角半透明 + 图标 + 放大动效）、进程枚举、ShellExecuteW 启动在真机阶段
+接入；皮肤（L2）与场景（L3）的 dock 段已自动生效。
+
 ## 架构（§2：微内核 + 可插拔能力模块 + 拓扑适配层）
 
 ```
@@ -116,6 +123,7 @@ crates/orange-wallpaper 壁纸模块：拓扑适配 + DComp flip-model 渲染
 crates/orange-taskbar   任务栏透明模块：composition API + 规则引擎 + 能力降级
 crates/orange-widgets   小组件系统：IWidget 契约 + EDF 调度器 + 崩溃隔离
 crates/orange-audio     音频响应：WASAPI loopback + FFT 频谱广播
+crates/orange-dock      悬浮 Dock（新增启动器，非任务栏替换）：数据层就绪
 crates/orange-skin      声明式皮肤层（L2）：一个 YAML = 一套完整桌面
 tools/perf-bench        性能采样脚本（CI 门禁数据源）
 ```
