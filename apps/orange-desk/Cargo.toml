@@ -10,6 +10,7 @@ name = "orange-desk"
 path = "src/main.rs"
 
 [dependencies]
+orange-audio = { workspace = true }
 orange-kernel = { workspace = true }
 orange-module-api = { workspace = true }
 orange-skin = { workspace = true }

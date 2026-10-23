@@ -100,6 +100,12 @@ orange-desk --scene game      # 手动激活并持久化（active_scene）
 仅调档或换源、任务栏重建规则即时重评估、组件集合热重载（失败自动回滚旧配置）——
 这也是配置热重载的公共地基（F9 热重载的机制已就位）。
 
+音频响应（§13 F4，Wallpaper Engine 音频可视化同款）：`orange-audio` 模块经
+WASAPI loopback 抓取系统混音（事件驱动、零轮询），FFT → 16 段对数频谱 →
+`AudioSpectrum` 事件以 ~30Hz 广播（EMA 平滑、静音停发）；首个消费者
+`spectrum` 组件已内置（unicode 条形图，D2D 渲染层上线后升级为柱状图），
+壁纸渲染响应（音频可视化叠加）待真机阶段接入。预算 0.3% CPU / 10MB。
+
 ## 架构（§2：微内核 + 可插拔能力模块 + 拓扑适配层）
 
 ```
@@ -109,6 +115,7 @@ crates/orange-module-api 模块契约：IModule 生命周期、KernelEvent、资
 crates/orange-wallpaper 壁纸模块：拓扑适配 + DComp flip-model 渲染
 crates/orange-taskbar   任务栏透明模块：composition API + 规则引擎 + 能力降级
 crates/orange-widgets   小组件系统：IWidget 契约 + EDF 调度器 + 崩溃隔离
+crates/orange-audio     音频响应：WASAPI loopback + FFT 频谱广播
 crates/orange-skin      声明式皮肤层（L2）：一个 YAML = 一套完整桌面
 tools/perf-bench        性能采样脚本（CI 门禁数据源）
 ```

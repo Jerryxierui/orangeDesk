@@ -27,7 +27,13 @@ pub struct SupervisorOptions {
     pub demo_events: bool,
     /// 事件观察者（§13 L3 场景触发器等 app 层逻辑）：内核保持零场景知识
     pub event_observer: Option<EventObserver>,
+    /// 总线就绪回调（§13 F4 等）：在模块初始化前调用一次，传入总线发布端，
+    /// 供音频等数据流模块把 worker 的事件接入总线
+    pub publisher_tap: Option<PublisherTap>,
 }
+
+/// 总线就绪回调：拿一个 EventPublisher 副本，可长期持有
+pub type PublisherTap = std::sync::Arc<dyn Fn(crate::bus::EventPublisher) + Send + Sync>;
 
 /// 单模块的退出报告行（性能仪表盘数据；detail 为模块自述的降级/材质状态）
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -85,6 +91,7 @@ pub fn run(
     }
     // 全产品进程级预算（§4）
     budgets.register(&process_total_declaration());
+
     match registry.resolve() {
         Ok(_) => {}
         Err(err) => {
@@ -96,6 +103,10 @@ pub fn run(
     log::info!("kernel online: {online} module(s)");
 
     let bus = EventBus::new();
+    // 总线就绪：数据流模块（音频等）把 worker 的事件桥接入总线
+    if let Some(tap) = options.publisher_tap.as_ref() {
+        tap(bus.publisher());
+    }
     platform::install_ctrl_handler()
         .map_err(|err| {
             log::warn!("ctrl handler not installed: {err}");

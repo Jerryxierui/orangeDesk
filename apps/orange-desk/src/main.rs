@@ -5,6 +5,7 @@
 
 use std::process::ExitCode;
 
+use orange_audio::AudioModule;
 use orange_kernel::{config, single_instance, supervisor};
 use orange_module_api::Module;
 use orange_taskbar::TaskbarModule;
@@ -290,10 +291,15 @@ fn main() -> ExitCode {
 
     // 模块装配：新增能力 = 在此注册一个新模块，不触碰内核
     // （v0.4+：window-material）
+    let audio = AudioModule::new();
+    // 音频事件桥（§13 F4）：supervisor 的 publisher_tap 在总线就绪后注入，
+    // worker 的 AudioSpectrum 事件由此进入总线
+    let audio_sink = audio.sink();
     let modules: Vec<Box<dyn Module>> = vec![
         Box::new(WallpaperModule::new()),
         Box::new(TaskbarModule::new()),
         Box::new(WidgetHost::new()),
+        Box::new(audio),
     ];
 
     let report = supervisor::run(
@@ -302,6 +308,9 @@ fn main() -> ExitCode {
         supervisor::SupervisorOptions {
             demo_events: options.demo_events,
             event_observer,
+            publisher_tap: Some(std::sync::Arc::new(move |publisher| {
+                let _ = audio_sink.set(std::sync::Arc::new(move |event| publisher.publish(event)));
+            })),
         },
     );
 

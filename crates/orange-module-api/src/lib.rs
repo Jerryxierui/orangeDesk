@@ -14,7 +14,7 @@ pub type ModuleId = &'static str;
 ///
 /// 由平台事件源（WinEventHook / Shell 广播 / 电源与会话通知）推送，
 /// 内核总线分发到每个在线模块。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum KernelEvent {
     /// 内核完成全部模块初始化，进入运行态
     Startup,
@@ -45,6 +45,10 @@ pub enum KernelEvent {
         module: String,
         config: serde_json::Value,
     },
+    /// 音频频谱（§13 F4 音频响应）：归一化频段能量（0.0–1.0，对数分布）。
+    /// 由音频模块以 ~30Hz 节流广播；壁纸 / 组件订阅做可视化。
+    /// 这是持续数据流而非低频状态——仅音频可视化链路允许消费它
+    AudioSpectrum { bands: Vec<f32> },
 }
 
 /// 模块降级档位（§5 降级矩阵）。序数越大降级越深，性能仪表盘直接展示。

@@ -1,4 +1,4 @@
-//! 第一方组件（§3 B-3）：时钟、系统监控。
+//! 第一方组件（§3 B-3）：时钟、系统监控、频谱可视化。
 //! 天气 / 媒体控制 / 待办在后续批次接入（渲染层上线后）。
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -176,6 +176,67 @@ fn read_system_metrics(_widget: &mut SysMonWidget) -> (String, u64, u64) {
     ("n/a".to_string(), 0, 0)
 }
 
+/// 频谱数据通道：host（事件分发线程）写入最新频段，widget（worker 线程）读取
+pub type SpectrumChannel = std::sync::Arc<std::sync::Mutex<Vec<f32>>>;
+
+/// 音频频谱可视化组件（§13 F4 首个消费者；30ms 更新≈33fps）
+///
+/// 数据来自 AudioModule 广播的 `AudioSpectrum` 事件——WidgetHost 收到后写入
+/// [`SpectrumChannel`]，本组件 update 时读取渲染（数据层先以 unicode 块字符
+/// 输出条形图，D2D 渲染层上线后替换为真柱状图）。
+pub struct SpectrumWidget {
+    channel: SpectrumChannel,
+    frame: WidgetFrame,
+}
+
+impl SpectrumWidget {
+    pub fn new(channel: SpectrumChannel) -> Self {
+        Self {
+            channel,
+            frame: WidgetFrame::default(),
+        }
+    }
+}
+
+/// 频段 → unicode 块字符条形（纯逻辑，可测）
+pub fn bars_for(bands: &[f32]) -> String {
+    const LEVELS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+    bands
+        .iter()
+        .map(|b| {
+            let level = (b.clamp(0.0, 1.0) * (LEVELS.len() - 1) as f32).round() as usize;
+            LEVELS[level]
+        })
+        .collect()
+}
+
+impl IWidget for SpectrumWidget {
+    fn metadata(&self) -> WidgetMetadata {
+        WidgetMetadata {
+            id: "spectrum",
+            display_name: "Spectrum",
+            update_interval: std::time::Duration::from_millis(30),
+            occlusion_policy: OcclusionPolicy::Pause,
+        }
+    }
+
+    fn update(&mut self, _now_ms: u64) -> Result<(), WidgetError> {
+        if let Ok(bands) = self.channel.lock() {
+            self.frame = WidgetFrame {
+                lines: vec![bars_for(&bands)],
+            };
+        }
+        Ok(())
+    }
+
+    fn suspend(&mut self) {}
+    fn resume(&mut self) {}
+    fn finalize(&mut self) {}
+    fn frame(&self) -> WidgetFrame {
+        self.frame.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +286,34 @@ mod tests {
         assert_eq!(frame.lines.len(), 2);
         assert!(frame.lines[0].starts_with("CPU"));
         assert!(frame.lines[1].starts_with("MEM"));
+    }
+
+    #[test]
+    fn bars_map_levels() {
+        assert_eq!(bars_for(&[0.0, 1.0]), "▁█");
+        assert_eq!(bars_for(&[0.5, 0.75]), "▅▆");
+        // 越界值被钳制（事件数据健壮性）
+        assert_eq!(bars_for(&[-1.0, 2.0]), "▁█");
+        assert_eq!(bars_for(&[]), "");
+    }
+
+    #[test]
+    fn spectrum_widget_reads_channel() {
+        let channel: SpectrumChannel = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let mut widget = SpectrumWidget::new(channel.clone());
+        assert_eq!(widget.metadata().id, "spectrum");
+        assert_eq!(
+            widget.metadata().update_interval,
+            std::time::Duration::from_millis(30)
+        );
+
+        // 通道无数据：空帧不 panic
+        widget.update(0).unwrap();
+        assert!(widget.frame().lines[0].is_empty());
+
+        // host 写入频段 → widget 读取渲染
+        *channel.lock().unwrap() = vec![0.2, 0.5, 0.9];
+        widget.update(1).unwrap();
+        assert_eq!(widget.frame().lines[0], "▂▅▇");
     }
 }

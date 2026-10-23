@@ -56,6 +56,8 @@ pub struct WidgetHost {
     worker: Option<JoinHandle<()>>,
     /// 最近一次生效的配置段（热配置失败时回滚用）
     last_config: ModuleConfig,
+    /// 频谱数据通道（§13 F4：on_event 写入，SpectrumWidget 读取）
+    spectrum: widgets::SpectrumChannel,
 }
 
 impl WidgetHost {
@@ -68,11 +70,17 @@ impl WidgetHost {
             shared: Arc::new(Mutex::new(HostShared::default())),
             worker: None,
             last_config: serde_json::Value::Null,
+            spectrum: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn set_pause(&self, paused: bool) {
         self.controls.pause.store(paused, Ordering::SeqCst);
+    }
+
+    /// 频谱通道的共享端（app 装配时传给音频事件桥）
+    pub fn spectrum_channel(&self) -> widgets::SpectrumChannel {
+        self.spectrum.clone()
     }
 }
 
@@ -87,12 +95,16 @@ fn monotonic_ms(since: Instant) -> u64 {
     since.elapsed().as_millis() as u64
 }
 
-/// 组装第一方组件（B-3 首发集合的前两个；天气 / 媒体控制 / 待办在渲染层后接入）
-fn build_first_party_widgets() -> Vec<Box<dyn IWidget>> {
-    vec![
+/// 组装第一方组件（B-3 首发集合；天气 / 媒体控制 / 待办在渲染层后接入）
+fn build_first_party_widgets(spectrum: Option<widgets::SpectrumChannel>) -> Vec<Box<dyn IWidget>> {
+    let mut set: Vec<Box<dyn IWidget>> = vec![
         Box::new(widgets::ClockWidget::new()),
         Box::new(widgets::SysMonWidget::new()),
-    ]
+    ];
+    if let Some(channel) = spectrum {
+        set.push(Box::new(widgets::SpectrumWidget::new(channel)));
+    }
+    set
 }
 
 /// 组件模块配置段（modules.widgets / 皮肤 widgets 段）
@@ -308,7 +320,8 @@ impl Module for WidgetHost {
     fn initialize(&mut self, config: &ModuleConfig) -> Result<(), ModuleError> {
         // 皮肤 / 配置可选组件（§13 F3；解析失败 = 默认全开，不拖垮模块）
         let settings: WidgetSettings = serde_json::from_value(config.clone()).unwrap_or_default();
-        let (widgets, disabled, unknown) = settings.filter(build_first_party_widgets());
+        let (widgets, disabled, unknown) =
+            settings.filter(build_first_party_widgets(Some(self.spectrum.clone())));
         for id in &disabled {
             log::info!("widgets: '{id}' disabled by config/skin");
         }
@@ -347,6 +360,12 @@ impl Module for WidgetHost {
             KernelEvent::LockScreenChanged { locked: false }
             | KernelEvent::PowerSaverChanged { enabled: false }
             | KernelEvent::FullscreenChanged { fullscreen: false } => self.set_pause(false),
+            // 音频频谱（§13 F4）：分发线程写入通道，SpectrumWidget 在 worker 读取
+            KernelEvent::AudioSpectrum { bands } => {
+                if let Ok(mut slot) = self.spectrum.lock() {
+                    *slot = bands.clone();
+                }
+            }
             // 热配置（§13 L3 / F3b）：enabled 集合变化 → 重启 worker 换装组件。
             // 停旧 worker（join 保证线程退出）再按新配置重建，隔离计数延续
             KernelEvent::ModuleConfigChanged { config, .. } => {
@@ -503,6 +522,6 @@ mod tests {
 
     #[test]
     fn first_party_widget_count_within_cap() {
-        assert!(build_first_party_widgets().len() <= MAX_WIDGETS);
+        assert!(build_first_party_widgets(None).len() <= MAX_WIDGETS);
     }
 }
