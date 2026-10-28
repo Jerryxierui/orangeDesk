@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use orange_dock::island::IslandSettings;
 use orange_dock::DockSettings;
 use orange_taskbar::TaskbarSettings;
 use orange_wallpaper::WallpaperSettings;
@@ -39,6 +40,8 @@ pub struct SkinFile {
     pub widgets: Option<WidgetSettings>,
     /// 悬浮 Dock 段（modules.dock；F7）
     pub dock: Option<DockSettings>,
+    /// 灵动岛段（modules.island）
+    pub island: Option<IslandSettings>,
     /// 窗口材质（v0.4 模块预留；仅校验取值，暂不生效并提示）
     pub window_material: Option<WindowMaterialPreview>,
 }
@@ -135,6 +138,12 @@ pub fn compile(skin: &SkinFile) -> (BTreeMap<String, serde_json::Value>, Vec<Str
         modules.insert(
             "dock".to_string(),
             serde_json::to_value(dock).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Some(island) = &skin.island {
+        modules.insert(
+            "island".to_string(),
+            serde_json::to_value(island).unwrap_or(serde_json::Value::Null),
         );
     }
     if skin.window_material.is_some() {

@@ -113,6 +113,14 @@ WASAPI loopback 抓取系统混音（事件驱动、零轮询），FFT → 16 �
 窗口（圆角半透明 + 图标 + 放大动效）、进程枚举、ShellExecuteW 启动在真机阶段
 接入；皮肤（L2）与场景（L3）的 dock 段已自动生效。
 
+灵动岛（Dynamic Island 式活动胶囊）：顶部胶囊窗口按"活动"变形——收缩态显示
+最高优先级活动的单行摘要（媒体 ♪ / 倒计时 ⏱ / 专注 ◐ / 频谱条形），展开态
+显示详情卡片（进度 / 宽频谱），超时自动收回。活动优先级：倒计时 > 播放中媒体
+> 暂停媒体 > 专注 > DND > 频谱；媒体源接 `MediaSource`（真机 SMTC），频谱接
+`AudioSpectrum` 事件，定时器 / 专注入口随托盘与快捷指令接入。配置
+`modules.island`（位置 / 自动收回时长 / 活动启停），皮肤与场景段已生效；
+DComp 胶囊渲染窗口（形变动画）在真机阶段接入。
+
 ## 架构（§2：微内核 + 可插拔能力模块 + 拓扑适配层）
 
 ```
@@ -123,7 +131,7 @@ crates/orange-wallpaper 壁纸模块：拓扑适配 + DComp flip-model 渲染
 crates/orange-taskbar   任务栏透明模块：composition API + 规则引擎 + 能力降级
 crates/orange-widgets   小组件系统：IWidget 契约 + EDF 调度器 + 崩溃隔离
 crates/orange-audio     音频响应：WASAPI loopback + FFT 频谱广播
-crates/orange-dock      悬浮 Dock（新增启动器，非任务栏替换）：数据层就绪
+crates/orange-dock      悬浮 UI 家族：Dock（新增启动器，非任务栏替换）+ 灵动岛
 crates/orange-skin      声明式皮肤层（L2）：一个 YAML = 一套完整桌面
 tools/perf-bench        性能采样脚本（CI 门禁数据源）
 ```

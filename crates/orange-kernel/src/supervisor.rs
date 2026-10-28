@@ -140,6 +140,7 @@ pub fn run(
     // 每 60s 广播 MinuteTick（§13 F1 播放列表等分钟级定时功能的驱动源）。
     let mut last_sample = Instant::now() - SAMPLE_INTERVAL;
     let mut last_minute = Instant::now();
+    let mut last_second = Instant::now();
     loop {
         match bus.recv_timeout(Duration::from_millis(250)) {
             Some(KernelEvent::ShutdownRequested) => {
@@ -161,6 +162,10 @@ pub fn run(
         if last_minute.elapsed() >= Duration::from_secs(60) {
             last_minute = Instant::now();
             publisher.publish(KernelEvent::MinuteTick);
+        }
+        if last_second.elapsed() >= Duration::from_secs(1) {
+            last_second = Instant::now();
+            publisher.publish(KernelEvent::SecondTick);
         }
         if last_sample.elapsed() >= SAMPLE_INTERVAL {
             last_sample = Instant::now();

@@ -391,6 +391,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "orange-module-api",
+ "orange-widgets",
  "serde",
  "serde_json",
  "thiserror",

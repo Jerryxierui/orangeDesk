@@ -15,6 +15,8 @@ use orange_module_api::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod island;
+
 /// Dock 停靠边
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
